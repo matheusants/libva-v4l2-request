@@ -7,10 +7,16 @@
  * more changes. So keep them private until they are stable and ready to
  * become part of the official public API.
  */
+#pragma once
 
 #ifndef _H264_CTRLS_H_
 #define _H264_CTRLS_H_
 
+#include "v4l2-compat.h"
+
+//#define __LINUX_V4L2_CONTROLS_H
+
+#include <linux/types.h>
 #include <linux/videodev2.h>
 
 /* Our pixel format isn't stable at the moment */
@@ -21,11 +27,27 @@
  * would be added during the phase where those controls are not
  * stable. It should be fixed eventually.
  */
-#define V4L2_CID_MPEG_VIDEO_H264_SPS		(V4L2_CID_MPEG_BASE+1000)
-#define V4L2_CID_MPEG_VIDEO_H264_PPS		(V4L2_CID_MPEG_BASE+1001)
+
+ 
+/* =========================
+ * DEFINES MPEG (BSP antigo)
+ * ========================= */
+
+#define V4L2_CID_MPEG_VIDEO_H264_SPS			(V4L2_CID_MPEG_BASE+1000)
+#define V4L2_CID_MPEG_VIDEO_H264_PPS			(V4L2_CID_MPEG_BASE+1001)
 #define V4L2_CID_MPEG_VIDEO_H264_SCALING_MATRIX	(V4L2_CID_MPEG_BASE+1002)
 #define V4L2_CID_MPEG_VIDEO_H264_SLICE_PARAMS	(V4L2_CID_MPEG_BASE+1003)
 #define V4L2_CID_MPEG_VIDEO_H264_DECODE_PARAMS	(V4L2_CID_MPEG_BASE+1004)
+
+/* =========================
+ * COMPAT: STATELESS -> MPEG
+ * ========================= */
+
+#define V4L2_CID_STATELESS_H264_SPS				V4L2_CID_MPEG_VIDEO_H264_SPS
+#define V4L2_CID_STATELESS_H264_PPS				V4L2_CID_MPEG_VIDEO_H264_PPS
+#define V4L2_CID_STATELESS_H264_SCALING_MATRIX	V4L2_CID_MPEG_VIDEO_H264_SCALING_MATRIX
+#define V4L2_CID_STATELESS_H264_SLICE_PARAMS	V4L2_CID_MPEG_VIDEO_H264_SLICE_PARAMS
+#define V4L2_CID_STATELESS_H264_DECODE_PARAMS	V4L2_CID_MPEG_VIDEO_H264_DECODE_PARAMS
 
 /* enum v4l2_ctrl_type type values */
 #define V4L2_CTRL_TYPE_H264_SPS			0x0110
@@ -49,7 +71,7 @@
 #define V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD		0x20
 #define V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE			0x40
 
-struct v4l2_ctrl_h264_sps {
+struct v4l2_ctrl_h264_sps_PROJECT {
 	__u8 profile_idc;
 	__u8 constraint_set_flags;
 	__u8 level_idc;
@@ -79,7 +101,7 @@ struct v4l2_ctrl_h264_sps {
 #define V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE				0x0040
 #define V4L2_H264_PPS_FLAG_PIC_SCALING_MATRIX_PRESENT			0x0080
 
-struct v4l2_ctrl_h264_pps {
+struct v4l2_ctrl_h264_pps_PROJECT {
 	__u8 pic_parameter_set_id;
 	__u8 seq_parameter_set_id;
 	__u8 num_slice_groups_minus1;
@@ -93,7 +115,7 @@ struct v4l2_ctrl_h264_pps {
 	__u16 flags;
 };
 
-struct v4l2_ctrl_h264_scaling_matrix {
+struct v4l2_ctrl_h264_scaling_matrix_PROJECT {
 	__u8 scaling_list_4x4[6][16];
 	__u8 scaling_list_8x8[6][64];
 };
@@ -105,7 +127,7 @@ struct v4l2_h264_weight_factors {
 	__s16 chroma_offset[32][2];
 };
 
-struct v4l2_h264_pred_weight_table {
+struct v4l2_h264_pred_weight_table_PROJECT {
 	__u16 luma_log2_weight_denom;
 	__u16 chroma_log2_weight_denom;
 	struct v4l2_h264_weight_factors weight_factors[2];
@@ -122,7 +144,7 @@ struct v4l2_h264_pred_weight_table {
 #define V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED	0x04
 #define V4L2_H264_SLICE_FLAG_SP_FOR_SWITCH		0x08
 
-struct v4l2_ctrl_h264_slice_params {
+struct v4l2_ctrl_h264_slice_params_PROJECT {
 	/* Size in bytes, including header */
 	__u32 size;
 	/* Offset in bits to slice_data() from the beginning of this slice. */
@@ -140,7 +162,7 @@ struct v4l2_ctrl_h264_slice_params {
 	__s32 delta_pic_order_cnt0;
 	__s32 delta_pic_order_cnt1;
 
-	struct v4l2_h264_pred_weight_table pred_weight_table;
+	struct v4l2_h264_pred_weight_table_PROJECT pred_weight_table;
 	/* Size in bits of dec_ref_pic_marking() syntax element. */
 	__u32 dec_ref_pic_marking_bit_size;
 	/* Size in bits of pic order count syntax. */
@@ -158,7 +180,7 @@ struct v4l2_ctrl_h264_slice_params {
 
 	/*
 	 * Entries on each list are indices into
-	 * v4l2_ctrl_h264_decode_params.dpb[].
+	 * v4l2_ctrl_h264_decode_params_PROJECT.dpb[].
 	 */
 	__u8 ref_pic_list0[32];
 	__u8 ref_pic_list1[32];
@@ -170,7 +192,7 @@ struct v4l2_ctrl_h264_slice_params {
 #define V4L2_H264_DPB_ENTRY_FLAG_ACTIVE		0x02
 #define V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM	0x04
 
-struct v4l2_h264_dpb_entry {
+struct v4l2_h264_dpb_entry_PROJECT {
 	__u64 reference_ts;
 	__u16 frame_num;
 	__u16 pic_num;
@@ -182,8 +204,8 @@ struct v4l2_h264_dpb_entry {
 
 #define V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC	0x01
 
-struct v4l2_ctrl_h264_decode_params {
-	struct v4l2_h264_dpb_entry dpb[16];
+struct v4l2_ctrl_h264_decode_params_PROJECT {
+	struct v4l2_h264_dpb_entry_PROJECT dpb[16];
 	__u16 num_slices;
 	__u16 nal_ref_idc;
 	__u8 ref_pic_list_p0[32];

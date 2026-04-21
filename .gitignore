@@ -1,45 +1,17 @@
-# Object files
+# Meson build
+build/
+_build/
 *.o
-*.ko
-
-# Libraries
-*.lib
-*.a
-*.lo
-*.la
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
-*.so.*
-*.dylib
+*.a
+*.la
+*.lo
 
-# Misc
+# Arquivos temporários
+*.swp
+*.swo
 *~
-*.orig
-*.rej
-*.loT
-*.bin
-*.pc
-*.g[4-7]s
-.deps
-.libs
-install-sh
-libtool
-ltmain.sh
-compile
-missing
-Makefile
-Makefile.in
-autoconfig.h
-autoconfig.h.in
-stamp-h1
-aclocal.m4
-autom4te.cache
-config.guess
-config.log
-config.status
-config.sub
-configure
-depcomp
-TAGS
+.DS_Store
+
+# Binários
+subprojects/

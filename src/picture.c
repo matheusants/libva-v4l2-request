@@ -44,6 +44,8 @@
 
 #include <linux/videodev2.h>
 
+#include <poll.h>
+
 #include "media.h"
 #include "utils.h"
 #include "v4l2.h"
@@ -203,27 +205,53 @@ static VAStatus codec_set_controls(struct request_data *driver_data,
 }
 
 VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
-			     VASurfaceID surface_id)
+                             VASurfaceID surface_id)
 {
-	struct request_data *driver_data = context->pDriverData;
-	struct object_context *context_object;
-	struct object_surface *surface_object;
+        struct request_data *driver_data = context->pDriverData;
+        struct object_context *context_object;
+        struct object_surface *surface_object;
 
-	context_object = CONTEXT(driver_data, context_id);
-	if (context_object == NULL)
-		return VA_STATUS_ERROR_INVALID_CONTEXT;
+        context_object = CONTEXT(driver_data, context_id);
+        if (context_object == NULL)
+                return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-	surface_object = SURFACE(driver_data, surface_id);
-	if (surface_object == NULL)
-		return VA_STATUS_ERROR_INVALID_SURFACE;
+        surface_object = SURFACE(driver_data, surface_id);
+        if (surface_object == NULL)
+                return VA_STATUS_ERROR_INVALID_SURFACE;
 
-	if (surface_object->status == VASurfaceRendering)
-		RequestSyncSurface(context, surface_id);
+        if (surface_object->status == VASurfaceRendering)
+                RequestSyncSurface(context, surface_id);
 
-	surface_object->status = VASurfaceRendering;
-	context_object->render_surface_id = surface_id;
+        /* Se esta surface ainda tem buffer CAPTURE no estado DONE no kernel
+         * (decodificação anterior concluída mas DQBUF propositalmente adiado
+         * para manter a referência acessível ao driver BSP T527), precisamos
+         * fazer o DQBUF agora, antes de re-enfileirar no próximo EndPicture.
+         *
+         * Isto é seguro porque RequestBeginPicture marca que esta surface
+         * está prestes a ser sobrescrita — ela não será mais usada como
+         * frame de referência pelo hardware para frames subsequentes.
+         */
+        if (surface_object->capture_queued) {
+                unsigned int capture_type = v4l2_type_video_capture(
+                        driver_data->video_format->v4l2_mplane);
+                int dq_rc = v4l2_dequeue_buffer(driver_data->video_fd, -1,
+                                                 capture_type,
+                                                 surface_object->destination_index,
+                                                 surface_object->destination_buffers_count);
+                request_log("RequestBeginPicture: deferred DQBUF CAPTURE "
+                            "dst_idx=%u rc=%d\n",
+                            surface_object->destination_index, dq_rc);
+                surface_object->capture_queued = false;
+                /* Não tratar como fatal: se falhar, o QBUF em EndPicture
+                 * retornará EINVAL e o erro será capturado lá */
+        }
 
-	return VA_STATUS_SUCCESS;
+        if (surface_object->request_fd >= 0)
+                media_request_reinit(surface_object->request_fd);
+
+        surface_object->status = VASurfaceRendering;
+        context_object->render_surface_id = surface_id;
+        return VA_STATUS_SUCCESS;
 }
 
 VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
@@ -266,72 +294,78 @@ VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 
 VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id)
 {
-	struct request_data *driver_data = context->pDriverData;
-	struct object_context *context_object;
-	struct object_config *config_object;
-	struct object_surface *surface_object;
-	struct video_format *video_format;
-	unsigned int output_type, capture_type;
-	int request_fd;
-	VAStatus status;
-	int rc;
+        struct request_data *driver_data = context->pDriverData;
+        struct object_context *context_object;
+        struct object_config *config_object;
+        struct object_surface *surface_object;
+        struct video_format *video_format;
+        unsigned int output_type, capture_type;
+        int request_fd;
+        VAStatus status;
+        int rc;
 
-	video_format = driver_data->video_format;
-	if (video_format == NULL)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
+        video_format = driver_data->video_format;
+        if (video_format == NULL)
+                return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	output_type = v4l2_type_video_output(video_format->v4l2_mplane);
-	capture_type = v4l2_type_video_capture(video_format->v4l2_mplane);
+        output_type = v4l2_type_video_output(video_format->v4l2_mplane);
+        capture_type = v4l2_type_video_capture(video_format->v4l2_mplane);
 
-	context_object = CONTEXT(driver_data, context_id);
-	if (context_object == NULL)
-		return VA_STATUS_ERROR_INVALID_CONTEXT;
+        context_object = CONTEXT(driver_data, context_id);
+        if (context_object == NULL)
+                return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-	config_object = CONFIG(driver_data, context_object->config_id);
-	if (config_object == NULL)
-		return VA_STATUS_ERROR_INVALID_CONFIG;
+        config_object = CONFIG(driver_data, context_object->config_id);
+        if (config_object == NULL)
+                return VA_STATUS_ERROR_INVALID_CONFIG;
 
-	surface_object =
-		SURFACE(driver_data, context_object->render_surface_id);
-	if (surface_object == NULL)
-		return VA_STATUS_ERROR_INVALID_SURFACE;
+        surface_object = SURFACE(driver_data, context_object->render_surface_id);
+        if (surface_object == NULL)
+                return VA_STATUS_ERROR_INVALID_SURFACE;
 
-	gettimeofday(&surface_object->timestamp, NULL);
+        request_fd = surface_object->request_fd;
+        if (request_fd < 0) {
+                request_fd = media_request_alloc(driver_data->media_fd);
+                if (request_fd < 0)
+                        return VA_STATUS_ERROR_OPERATION_FAILED;
+                surface_object->request_fd = request_fd;
+        }
 
-	request_fd = surface_object->request_fd;
-	if (request_fd < 0) {
-		request_fd = media_request_alloc(driver_data->media_fd);
-		if (request_fd < 0)
-			return VA_STATUS_ERROR_OPERATION_FAILED;
+        /* Gerar o timestamp ANTES de tudo.
+         * 1) dpb_insert (dentro de codec_set_controls) precisa do timestamp
+         *    correto para gravar no dpb_entry — deve ser o mesmo que o kernel
+         *    vai ver no vb2_buf.timestamp do buffer CAPTURE.
+         * 2) O QBUF CAPTURE recebe este timestamp explicitamente para garantir
+         *    que vb2_buf.timestamp seja definido corretamente — o BSP T527 pode
+         *    não copiar automaticamente o timestamp do OUTPUT para o CAPTURE.
+         * 3) O QBUF OUTPUT usa o mesmo timestamp para criar o par coerente. */
+        gettimeofday(&surface_object->timestamp, NULL);
 
-		surface_object->request_fd = request_fd;
-	}
+        rc = codec_set_controls(driver_data, context_object,
+                                config_object->profile, surface_object);
+        if (rc != VA_STATUS_SUCCESS)
+                return rc;
 
-	rc = codec_set_controls(driver_data, context_object,
-				config_object->profile, surface_object);
-	if (rc != VA_STATUS_SUCCESS)
-		return rc;
+        rc = v4l2_queue_buffer(driver_data->video_fd, -1, capture_type,
+                               &surface_object->timestamp,
+                               surface_object->destination_index, 0,
+                               surface_object->destination_buffers_count);
+        if (rc < 0)
+                return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	rc = v4l2_queue_buffer(driver_data->video_fd, -1, capture_type, NULL,
-			       surface_object->destination_index, 0,
-			       surface_object->destination_buffers_count);
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
+        rc = v4l2_queue_buffer(driver_data->video_fd, request_fd, output_type,
+                               &surface_object->timestamp,
+                               surface_object->source_index,
+                               surface_object->slices_size, 1);
+        if (rc < 0)
+                return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	rc = v4l2_queue_buffer(driver_data->video_fd, request_fd, output_type,
-			       &surface_object->timestamp,
-			       surface_object->source_index,
-			       surface_object->slices_size, 1);
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
+        surface_object->slices_size = 0;
 
-	surface_object->slices_size = 0;
+        status = RequestSyncSurface(context, context_object->render_surface_id);
+        if (status != VA_STATUS_SUCCESS)
+                return status;
 
-	status = RequestSyncSurface(context, context_object->render_surface_id);
-	if (status != VA_STATUS_SUCCESS)
-		return status;
-
-	context_object->render_surface_id = VA_INVALID_ID;
-
-	return VA_STATUS_SUCCESS;
+        context_object->render_surface_id = VA_INVALID_ID;
+        return VA_STATUS_SUCCESS;
 }

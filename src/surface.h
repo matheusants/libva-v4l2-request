@@ -27,6 +27,8 @@
 #ifndef _SURFACE_H_
 #define _SURFACE_H_
 
+#include <stdbool.h>
+
 #include <linux/videodev2.h>
 
 #include <va/va_backend.h>
@@ -85,6 +87,9 @@ struct object_surface {
 	} params;
 
 	int request_fd;
+	/* Sugestões Claude Patch 1.0 */
+	bool capture_queued;  /* buffer CAPTURE está enfileirado no kernel */
+	//bool is_queued_in_v4l2; // Sugestão Google IA Patch 1.08 - INDICAR SE O BUFFER DE SAÍDA FOI ENFILEIRADO NO V4L2 */
 };
 
 VAStatus RequestCreateSurfaces2(VADriverContextP context, unsigned int format,

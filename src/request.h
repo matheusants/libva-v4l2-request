@@ -55,6 +55,14 @@ struct request_data {
 	int media_fd;
 
 	struct video_format *video_format;
+
+	bool context_initialized;  // ← ADICIONE ISSO
+	bool output_fmt_set;
+	bool capture_fmt_set;
+	bool output_buffers_created;
+	bool capture_buffers_created;
+	bool output_streaming;
+	bool capture_streaming;
 };
 
 VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context);

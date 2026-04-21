@@ -27,8 +27,10 @@ project('libva-v4l2-request', 'c',
 cc = meson.get_compiler('c')
 
 # Let user specify kernel sources for newer UAPI headers
-kernel_headers_inc = include_directories()
-kernel_headers_dep = dependency('', required : false)
+kernel_headers_inc = include_directories('include')
+kernel_headers_dep = declare_dependency(
+    include_directories: kernel_headers_inc
+)
 kernel_headers = get_option('kernel_headers')
 if kernel_headers != ''
     kernel_headers_inc = include_directories(join_paths(kernel_headers, 'include'))
