@@ -41,6 +41,7 @@
 
 #include "utils.h"
 #include "h264.h"
+#include "v4l2_translation.h"
 
 enum h264_slice_type {
 	H264_SLICE_P = 0,
@@ -52,8 +53,7 @@ static bool is_picture_null(VAPictureH264 *pic)
 	return pic->picture_id == VA_INVALID_SURFACE;
 }
 
-static struct h264_dpb_entry *
-	dpb_find_invalid_entry(struct object_context *context)
+static struct h264_dpb_entry *dpb_find_invalid_entry(struct object_context *context)
 {
 	unsigned int i;
 
@@ -67,8 +67,7 @@ static struct h264_dpb_entry *
 	return NULL;
 }
 
-static struct h264_dpb_entry *
-	dpb_find_oldest_unused_entry(struct object_context *context)
+static struct h264_dpb_entry *dpb_find_oldest_unused_entry(struct object_context *context)
 {
 	unsigned int min_age = UINT_MAX;
 	unsigned int i;
@@ -98,7 +97,7 @@ static struct h264_dpb_entry *dpb_find_entry(struct object_context *context)
 }
 
 static struct h264_dpb_entry *dpb_lookup(struct object_context *context,
-					 VAPictureH264 *pic, unsigned int *idx)
+										 VAPictureH264 *pic, unsigned int *idx)
 {
 	unsigned int i;
 
@@ -155,8 +154,8 @@ static void dpb_insert(struct object_context *context, VAPictureH264 *pic,
 }
 
 static void dpb_update(struct request_data *driver_data,
-		       struct object_context *context,
-		       VAPictureParameterBufferH264 *parameters)
+					   struct object_context *context,
+					   VAPictureParameterBufferH264 *parameters)
 {
 	unsigned int i;
 
@@ -193,12 +192,12 @@ static void dpb_update(struct request_data *driver_data,
 }
 
 static void h264_fill_dpb(struct object_context *context,
-			  struct v4l2_ctrl_h264_decode_params_PROJECT *decode)
+			  			  struct v4l2_ctrl_h264_decode_params_internal *decode)
 {
 	int i;
 
 	for (i = 0; i < H264_DPB_SIZE; i++) {
-		struct v4l2_h264_dpb_entry_PROJECT *dpb = &decode->dpb[i];
+		struct v4l2_h264_dpb_entry_internal *dpb = &decode->dpb[i];
 		struct h264_dpb_entry *entry = &context->dpb.entries[i];
 		uint64_t timestamp;
 
@@ -234,16 +233,16 @@ static void h264_fill_dpb(struct object_context *context,
 }
 
 static void h264_va_picture_to_v4l2(struct request_data *driver_data,
-				    struct object_context *context,
-				    struct object_surface *surface,
-				    VAPictureParameterBufferH264 *VAPicture,
-				    struct v4l2_ctrl_h264_decode_params_PROJECT *decode,
-				    struct v4l2_ctrl_h264_pps_PROJECT *pps,
-				    struct v4l2_ctrl_h264_sps_PROJECT *sps)
+									struct object_context *context,
+									struct object_surface *surface,
+									VAPictureParameterBufferH264 *VAPicture,
+									struct v4l2_ctrl_h264_decode_params_internal *decode,
+									struct v4l2_ctrl_h264_pps_internal *pps,
+									struct v4l2_ctrl_h264_sps_internal *sps)
 {
 	h264_fill_dpb(context, decode);
 
-	//decode->num_slices = surface->slices_count;
+	decode->num_slices = surface->slices_count;
 	decode->top_field_order_cnt = VAPicture->CurrPic.TopFieldOrderCnt;
 	decode->bottom_field_order_cnt = VAPicture->CurrPic.BottomFieldOrderCnt;
 
@@ -305,10 +304,10 @@ static void h264_va_picture_to_v4l2(struct request_data *driver_data,
 		sps->flags |= V4L2_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO;
 }
 
-static void h264_va_matrix_to_v4l2(
-	struct request_data *driver_data, struct object_context *context,
-	VAIQMatrixBufferH264 *VAMatrix,
-	struct v4l2_ctrl_h264_scaling_matrix_PROJECT *v4l2_matrix)
+static void h264_va_matrix_to_v4l2(struct request_data *driver_data,
+								   struct object_context *context,
+								   VAIQMatrixBufferH264 *VAMatrix,
+								   struct v4l2_ctrl_h264_scaling_matrix_internal *v4l2_matrix)
 {
 	memcpy(v4l2_matrix->scaling_list_4x4, &VAMatrix->ScalingList4x4,
 	       sizeof(VAMatrix->ScalingList4x4));
@@ -324,16 +323,38 @@ static void h264_va_matrix_to_v4l2(
 	       sizeof(v4l2_matrix->scaling_list_8x8[3]));
 }
 
+static void h264_copy_pred_table(struct v4l2_h264_weight_factors_internal *factors,
+								 unsigned int num_refs,
+								 int16_t luma_weight[32],
+								 int16_t luma_offset[32],
+								 int16_t chroma_weight[32][2],
+								 int16_t chroma_offset[32][2])
+{
+	unsigned int i;
+
+	for (i = 0; i < num_refs; i++) {
+		unsigned int j;
+
+		factors->luma_weight[i] = luma_weight[i];
+		factors->luma_offset[i] = luma_offset[i];
+
+		for (j = 0; j < 2; j++) {
+			factors->chroma_weight[i][j] = chroma_weight[i][j];
+			factors->chroma_offset[i][j] = chroma_offset[i][j];
+		}
+	}
+}
+
 static void h264_va_slice_to_v4l2(struct request_data *driver_data,
-				  struct object_context *context,
-				  VASliceParameterBufferH264 *VASlice,
-				  VAPictureParameterBufferH264 *VAPicture,
-				  struct v4l2_ctrl_h264_slice_params_PROJECT *slice)
+								  struct object_context *context,
+								  VASliceParameterBufferH264 *VASlice,
+								  VAPictureParameterBufferH264 *VAPicture,
+								  struct v4l2_ctrl_h264_slice_params_internal *slice)
 {
 	/* Garantir estrutura limpa */
 	memset(slice, 0, sizeof(*slice));
 
-	//slice->size = VASlice->slice_data_size;
+	slice->size = VASlice->slice_data_size;
 	slice->header_bit_size = VASlice->slice_data_bit_offset;
 	slice->first_mb_in_slice = VASlice->first_mb_in_slice;
 	//slice->slice_type = VASlice->slice_type;
@@ -359,6 +380,7 @@ static void h264_va_slice_to_v4l2(struct request_data *driver_data,
 	if (((VASlice->slice_type % 5) == H264_SLICE_P) ||
 	    ((VASlice->slice_type % 5) == H264_SLICE_B)) {
 		unsigned int i;
+		
 		unsigned int max = VASlice->num_ref_idx_l0_active_minus1 + 1;
 
 		if (max > 32)
@@ -373,18 +395,13 @@ static void h264_va_slice_to_v4l2(struct request_data *driver_data,
 			if (!entry)
 				continue;
 
-			/* O kernel BSP T527 usa o header h264-ctrls.h original
-			 * onde ref_pic_list0 é __u8[32] — cada byte é o índice
-			 * DPB direto. NÃO usar .index/.fields (struct nova) pois
-			 * causaria layout incompatível: kernel leria os 2 bytes
-			 * de cada entry como dois índices separados, corrompendo
-			 * toda a ref list e fazendo P/B frames decodificarem errado. */
 			slice->ref_pic_list0[i] = idx;
 		}
 	}
 
 	if ((VASlice->slice_type % 5) == H264_SLICE_B) {
 		unsigned int i;
+
 		unsigned int max = VASlice->num_ref_idx_l1_active_minus1 + 1;
 
 		if (max > 32)
@@ -406,17 +423,39 @@ static void h264_va_slice_to_v4l2(struct request_data *driver_data,
 	if (VASlice->direct_spatial_mv_pred_flag)
 		slice->flags |= V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
 
+	slice->pred_weight_table.chroma_log2_weight_denom =
+		VASlice->chroma_log2_weight_denom;
+	slice->pred_weight_table.luma_log2_weight_denom =
+		VASlice->luma_log2_weight_denom;
+
+	if (((VASlice->slice_type % 5) == H264_SLICE_P) ||
+	    ((VASlice->slice_type % 5) == H264_SLICE_B))
+		h264_copy_pred_table(&slice->pred_weight_table.weight_factors[0],
+				     slice->num_ref_idx_l0_active_minus1 + 1,
+				     VASlice->luma_weight_l0,
+				     VASlice->luma_offset_l0,
+				     VASlice->chroma_weight_l0,
+				     VASlice->chroma_offset_l0);
+
+	if ((VASlice->slice_type % 5) == H264_SLICE_B)
+		h264_copy_pred_table(&slice->pred_weight_table.weight_factors[1],
+				     slice->num_ref_idx_l1_active_minus1 + 1,
+				     VASlice->luma_weight_l1,
+				     VASlice->luma_offset_l1,
+				     VASlice->chroma_weight_l1,
+				     VASlice->chroma_offset_l1);
+
 }
 
 int h264_set_controls(struct request_data *driver_data,
 		      struct object_context *context,
 		      struct object_surface *surface)
 {
-	struct v4l2_ctrl_h264_scaling_matrix_PROJECT matrix = { 0 };
-	struct v4l2_ctrl_h264_decode_params_PROJECT decode = { 0 };
-	struct v4l2_ctrl_h264_slice_params_PROJECT slice = { 0 };
-	struct v4l2_ctrl_h264_pps_PROJECT pps = { 0 };
-	struct v4l2_ctrl_h264_sps_PROJECT sps = { 0 };
+	struct v4l2_ctrl_h264_scaling_matrix_internal matrix = { 0 };
+	struct v4l2_ctrl_h264_decode_params_internal decode = { 0 };
+	struct v4l2_ctrl_h264_slice_params_internal slice = { 0 };
+	struct v4l2_ctrl_h264_pps_internal pps = { 0 };
+	struct v4l2_ctrl_h264_sps_internal sps = { 0 };
 	struct h264_dpb_entry *output;
 	int rc;
 
@@ -430,38 +469,30 @@ int h264_set_controls(struct request_data *driver_data,
 	dpb_update(driver_data, context, &surface->params.h264.picture);
 
 	h264_va_picture_to_v4l2(driver_data, context, surface,
-				&surface->params.h264.picture, &decode, &pps,
-				&sps);
+							&surface->params.h264.picture, &decode, &pps,
+							&sps);
 	h264_va_matrix_to_v4l2(driver_data, context,
-			       &surface->params.h264.matrix, &matrix);
+			      		   &surface->params.h264.matrix, &matrix);
 	h264_va_slice_to_v4l2(driver_data, context, &surface->params.h264.slice,
-			      &surface->params.h264.picture, &slice);
+			      		  &surface->params.h264.picture, &slice);
 
-	rc = v4l2_set_control(driver_data->video_fd, surface->request_fd,
-			      V4L2_CID_STATELESS_H264_DECODE_PARAMS, &decode,
-			      sizeof(decode));
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
+	/*
+	 * Traduzir structs internas (_internal, formato antigo Bootlin/staging)
+	 * para as structs modernas que o kernel T527/Cedrus BSP 5.15 espera,
+	 * e enviar via VIDIOC_S_EXT_CTRLS com os CIDs STATELESS corretos.
+	 *
+	 * Tamanhos antigos → novos:
+	 *   SPS:    1048 → 1048 (idêntico, apenas renomeado)
+	 *   PPS:      12 →   12 (idêntico)
+	 *   MATRIX:  480 →  480 (idêntico)
+	 *   SLICE:   892 →  152 (tradução campo a campo necessária)
+	 *   DECODE:  496 →  624 (tradução campo a campo necessária)
+	 */
 
-	rc = v4l2_set_control(driver_data->video_fd, surface->request_fd,
-			      V4L2_CID_STATELESS_H264_SLICE_PARAMS, &slice,
-			      sizeof(slice));
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
+	rc = h264_translate_and_set_controls(driver_data->video_fd,
+										 surface->request_fd, &sps,
+										 &pps, &matrix, &slice, &decode);
 
-	rc = v4l2_set_control(driver_data->video_fd, surface->request_fd,
-			      V4L2_CID_STATELESS_H264_PPS, &pps, sizeof(pps));
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
-
-	rc = v4l2_set_control(driver_data->video_fd, surface->request_fd,
-			      V4L2_CID_STATELESS_H264_SPS, &sps, sizeof(sps));
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
-
-	rc = v4l2_set_control(driver_data->video_fd, surface->request_fd,
-			      V4L2_CID_STATELESS_H264_SCALING_MATRIX, &matrix,
-			      sizeof(matrix));
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
@@ -469,6 +500,7 @@ int h264_set_controls(struct request_data *driver_data,
 	 * setado pelo gettimeofday em EndPicture (antes do QBUF OUTPUT).
 	 * Este é o mesmo timestamp que o kernel usará no vb2_buf.timestamp
 	 * do buffer CAPTURE, e é o que vb2_find_timestamp() vai buscar. */
+	
 	dpb_insert(context, &surface->params.h264.picture.CurrPic, output,
 		   v4l2_timeval_to_ns(&surface->timestamp));
 

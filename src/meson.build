@@ -44,6 +44,7 @@ sources = [
 	'video.c',
 	'media.c',
 	'v4l2.c',
+	'v4l2_translation.c',
 	'mpeg2.c',
 	'h264.c',
 	'h265.c'
@@ -68,6 +69,7 @@ headers = [
 	'video.h',
 	'media.h',
 	'v4l2.h',
+	'v4l2_translation.h',
 	'mpeg2.h',
 	'h264.h',
 	'h265.h'
