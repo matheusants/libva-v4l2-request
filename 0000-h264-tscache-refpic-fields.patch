@@ -1,0 +1,25 @@
+--- a/src/h264.h
++++ b/src/h264.h
+@@ -36,6 +36,26 @@ struct request_data;
+ 
+ #define H264_DPB_SIZE 16
+ 
++#define H264_TS_CACHE_SIZE (H264_DPB_SIZE + 4)
++
++struct h264_ts_cache_entry {
++	VASurfaceID surface_id;
++	uint64_t    timestamp;
++};
++
+ struct h264_dpb_entry {
+ 	VAPictureH264 pic;
+ 	unsigned int age;
+@@ -48,7 +68,8 @@ struct h264_dpb_entry {
+ };
+ 
+ struct h264_dpb {
+-	struct h264_dpb_entry entries[H264_DPB_SIZE];
++	struct h264_dpb_entry    entries[H264_DPB_SIZE];
++	struct h264_ts_cache_entry ts_cache[H264_TS_CACHE_SIZE];
+ 	unsigned int age;
+ };

@@ -13,5 +13,20 @@ _build/
 *~
 .DS_Store
 
+# Pastas Ocultas e de back-up
+.*/
+auto4te.cache/
+
+# Pastas e Arquivos do Code Agent
+node_modules/
+package-lock.json
+package.json
+
 # Binários
 subprojects/
+
+# Arquivos de teste
+test/
+
+# Arquivos de referência
+refs/

@@ -1,0 +1,26 @@
+--- a/src/h264.h
++++ b/src/h264.h
+@@ -1,17 +1,44 @@
+-#ifndef _H264_H_
+-#define _H264_H_
+ 
+-#include <stdbool.h>
++#include <stdbool.h>
++#include <stdint.h>
+ 
+ #define H264_DPB_SIZE 16
+ 
++#define H264_TS_CACHE_SIZE (H264_DPB_SIZE + 4)
++
++struct h264_ts_cache_entry {
++	VASurfaceID surface_id;
++	uint64_t    timestamp;
++};
++
+ struct h264_dpb {
+ 	struct h264_dpb_entry    entries[H264_DPB_SIZE];
++	struct h264_ts_cache_entry ts_cache[H264_TS_CACHE_SIZE];
+ 	unsigned int age;
+ };
+ 
++#endif

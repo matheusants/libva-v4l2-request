@@ -263,6 +263,10 @@ struct v4l2_ctrl_h264_slice_params_internal
 	__u8 ref_pic_list1[32];
 
 	__u32 flags;
+
+	__u8 ref_pic_list0_fields[32];
+	__u8 ref_pic_list1_fields[32];
+	
 };
 
 /**
