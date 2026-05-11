@@ -25,7 +25,9 @@ missing
 .DS_Store
 
 # Pastas Ocultas e de back-up
-.*/
+.agents/
+.claude/
+.openclaude/
 auto4te.cache/
 .vscode/
 
