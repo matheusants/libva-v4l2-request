@@ -39,6 +39,7 @@
 #include <string.h>
 
 #include <errno.h>
+#include <unistd.h>
 
 #include <sys/ioctl.h>
 
@@ -111,6 +112,10 @@ static VAStatus codec_store_buffer(struct request_data *driver_data,
 		case VAProfileH264ConstrainedBaseline:
 		case VAProfileH264MultiviewHigh:
 		case VAProfileH264StereoHigh:
+			/* Multi-slice limitation: only the LAST slice's params
+			 * are kept. Single-slice frames decode correctly. Multi-
+			 * slice frames need per-slice device_run + ctrls cycles
+			 * with a slice param array (not implemented). */
 			memcpy(&surface_object->params.h264.slice,
 			       buffer_object->data,
 			       sizeof(surface_object->params.h264.slice));
@@ -241,13 +246,20 @@ VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
                 request_log("RequestBeginPicture: deferred DQBUF CAPTURE "
                             "dst_idx=%u rc=%d\n",
                             surface_object->destination_index, dq_rc);
-                surface_object->capture_queued = false;
-                /* Não tratar como fatal: se falhar, o QBUF em EndPicture
-                 * retornará EINVAL e o erro será capturado lá */
+                /* Só limpa a flag se o DQBUF funcionou (rc >= 0).
+                 * Se falhar (EAGAIN = hw hung), mantém capture_queued=true
+                 * para tentar novamente na próxima vez. */
+                if (dq_rc >= 0)
+                        surface_object->capture_queued = false;
         }
 
-        if (surface_object->request_fd >= 0)
-                media_request_reinit(surface_object->request_fd);
+	if (surface_object->request_fd >= 0) {
+		/* MEDIA_REQUEST_IOC_REINIT is a no-op on BSP T527.
+		 * Close the old request_fd and allocate a new one in
+		 * RequestEndPicture. */
+		close(surface_object->request_fd);
+		surface_object->request_fd = -1;
+	}
 
         surface_object->status = VASurfaceRendering;
         context_object->render_surface_id = surface_id;
@@ -347,11 +359,12 @@ VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id)
                 return rc;
 
         rc = v4l2_queue_buffer(driver_data->video_fd, -1, capture_type,
-                               &surface_object->timestamp,
-                               surface_object->destination_index, 0,
-                               surface_object->destination_buffers_count);
+                                &surface_object->timestamp,
+                                surface_object->destination_index, 0,
+                                surface_object->destination_buffers_count);
         if (rc < 0)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
+        surface_object->capture_queued = true;
 
         rc = v4l2_queue_buffer(driver_data->video_fd, request_fd, output_type,
                                &surface_object->timestamp,
@@ -361,6 +374,7 @@ VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
 
         surface_object->slices_size = 0;
+        surface_object->slices_count = 0;
 
         status = RequestSyncSurface(context, context_object->render_surface_id);
         if (status != VA_STATUS_SUCCESS)

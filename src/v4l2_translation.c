@@ -343,16 +343,13 @@ int h264_translate_and_set_controls(
 	translate_slice_params(slice_proj, &slice);
 	translate_decode_params(decode_proj, slice_proj, &decode);
 
-	/*
-	 * Determinar se pred_weights é necessário usando a macro do kernel.
-	 * A macro referencia campos das structs MODERNAS já preenchidas,
-	 * portanto usamos &pps e &slice (não os _proj).
+/*
+	 * Sempre enviar PRED_WEIGHTS (mesmo se não for obrigatório) para
+	 * sobrescrever dados residuais de requisições anteriores, já que
+	 * MEDIA_REQUEST_IOC_REINIT é no-op no BSP T527.
 	 */
-	
-	need_pred_weights = V4L2_H264_CTRL_PRED_WEIGHTS_REQUIRED(&pps, &slice);
-
-	if (need_pred_weights)
-		translate_pred_weights(slice_proj, &pred_weights);
+	translate_pred_weights(slice_proj, &pred_weights);
+	need_pred_weights = 1;
 
 	request_log("h264_translate: SPS=%zu PPS=%zu MATRIX=%zu "
 		    "PRED_WEIGHTS=%zu(send=%d) SLICE=%zu DECODE=%zu\n",

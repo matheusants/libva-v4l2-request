@@ -31,6 +31,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include <assert.h>
 
@@ -143,6 +144,45 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
                 status = VA_STATUS_ERROR_OPERATION_FAILED;
                 goto error;
         }
+
+	/*
+	 * Set V4L2_CID_MPEG_VIDEO_H264_PROFILE for H264 contexts. The cedrus
+	 * BSP T527 driver registers this control with default=MAIN(2). When
+	 * decoding High Profile content (CABAC + 8x8 transform + ...) without
+	 * setting this to HIGH(4), the VE applies Main-profile decoding logic
+	 * to P/B slices and produces garbage. The I-frame decodes correctly
+	 * because it does not depend on profile-specific inter-prediction
+	 * pathways. Set ONCE at context creation (NOT per request).
+	 */
+	switch (config_object->profile) {
+	case VAProfileH264Main:
+	case VAProfileH264High:
+	case VAProfileH264ConstrainedBaseline:
+	case VAProfileH264MultiviewHigh:
+	case VAProfileH264StereoHigh: {
+		struct v4l2_control ctrl = { .id = V4L2_CID_MPEG_VIDEO_H264_PROFILE };
+		switch (config_object->profile) {
+		case VAProfileH264ConstrainedBaseline:
+			ctrl.value = V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE;
+			break;
+		case VAProfileH264Main:
+			ctrl.value = V4L2_MPEG_VIDEO_H264_PROFILE_MAIN;
+			break;
+		default:
+			ctrl.value = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+			break;
+		}
+		if (ioctl(driver_data->video_fd, VIDIOC_S_CTRL, &ctrl) < 0)
+			request_log("RequestCreateContext: S_CTRL H264_PROFILE=%d "
+				    "failed: %s\n", ctrl.value, strerror(errno));
+		else
+			request_log("RequestCreateContext: H264_PROFILE set to %d\n",
+				    ctrl.value);
+		break;
+	}
+	default:
+		break;
+	}
 
 	rc = v4l2_create_buffers(driver_data->video_fd, output_type,
 				 surfaces_count, &output_index_base);

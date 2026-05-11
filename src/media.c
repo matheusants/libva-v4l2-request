@@ -107,13 +107,17 @@ int media_request_wait_completion(int request_fd)
 
         rc = poll(&pfd, 1, 1000);
         request_log("media_request_wait_completion: poll rc=%d revents=0x%x\n",
-		    rc, pfd.revents);
+                    rc, pfd.revents);
         if (rc == 0) {
                 request_log("media_request_wait_completion: timeout\n");
                 return -1;
         } else if (rc < 0) {
                 request_log("media_request_wait_completion: poll failed: %s\n",
                             strerror(errno));
+                return -1;
+        } else if ((pfd.revents & POLLPRI) == 0) {
+                request_log("media_request_wait_completion: POLLPRI not set (revents=0x%x), treating as timeout\n",
+                            pfd.revents);
                 return -1;
         }
 

@@ -1,4 +1,0 @@
-[60281.831441][ctx       none]==========va_TraceInitialize
-[60281.831480][ctx       none]=========vaInitialize ret = VA_STATUS_ERROR_UNKNOWN, unknown libva error 
-[60281.831497][ctx       none]==========va_TraceTerminate
-[60281.831591][ctx       none]=========vaTerminate ret = VA_STATUS_SUCCESS, success (no error) 

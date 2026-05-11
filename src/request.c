@@ -174,8 +174,7 @@ VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
 	        }
 	}
 
-	//video_fd = open(video_path, O_RDWR | O_NONBLOCK);
-	video_fd = open(video_path, O_RDWR);
+	video_fd = open(video_path, O_RDWR | O_NONBLOCK);
 
 	if (video_fd < 0) {
                 perror("DEBUG: open video failed");

@@ -6,6 +6,17 @@ _build/
 *.a
 *.la
 *.lo
+*.m4
+depcomp
+configure
+compile
+*.guess
+config.log
+install-sh
+libtool
+ltmain.sh
+Makefile.in
+missing
 
 # Arquivos temporários
 *.swp
@@ -16,11 +27,15 @@ _build/
 # Pastas Ocultas e de back-up
 .*/
 auto4te.cache/
+.vscode/
 
 # Pastas e Arquivos do Code Agent
 node_modules/
 package-lock.json
 package.json
+CLAUDE*.md
+AGENTS.md
+
 
 # Binários
 subprojects/

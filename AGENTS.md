@@ -36,7 +36,23 @@ meson setup build -Dkernel_headers=/path/to/linux
 
 Test video: `test/Cavaleiros do Zodíaco 1h.264.mp4` — H264 High Profile, 1440x1080, 23.98 fps, yuv420p.
 
-Patches: `refs/patch_cedrus/0001-0006` — patches for T527 variant. All patches are unified diffs applied with `patch -p1` from the kernel tree root. Patch 0005 expects the original unmodified `cedrus_h264.c` (with `vb2_find_timestamp`), NOT a pre-patched copy.
+Patches: `refs/patch_cedrus/0001-0009` — patches for T527 variant. All patches are unified diffs 
+applied with `patch -p1` from the kernel tree root.
+
+**IMPORTANT: Patch format requirement:** The orangepi-build system requires patches in 
+`diff -u` format (`--- a/file +++ b/file`), NOT git format (`diff --git` with `index` line). 
+Generate patches with:
+```sh
+diff -u arquivo_original arquivo_modificado > patch.patch
+```
+Then manually adjust paths to use `a/` and `b/` prefixes.
+
+**IMPORTANT: `refs/` directories are READ-ONLY reference trees.** Do NOT modify files in 
+`refs/orange-pi-5.15-sun55iw3/` or `refs/cedrus/`. Instead, copy originals to `/tmp/`, 
+make changes there, and generate patches with `diff -u`.
+
+Patch 0005 expects the original unmodified `cedrus_h264.c` (with `vb2_find_timestamp`), 
+NOT a pre-patched copy.
 
 Kernel source: `refs/orange-pi-5.15-sun55iw3/` (full orangepi-build kernel tree, BSP T527).
 
@@ -61,6 +77,20 @@ Kernel source: `refs/orange-pi-5.15-sun55iw3/` (full orangepi-build kernel tree,
 - `MEDIA_REQUEST_IOC_REINIT` is a no-op.
 - `/dev/media0` = ISP, `/dev/media1` = Cedrus VE.
 - **Deadly** (require reboot): QBUF of already-QUEUED buffer; `poll(POLLIN)` without buffers; DQBUF CAPTURE separated from DQBUF OUTPUT; DQBUF of unprocessed buffer.
+
+### CRITICAL: Duplicate device tree node issue (dmesg)
+Current dmesg shows TWO device tree nodes for same hardware:
+```
+cedrus 1c0e000.ve: Device registered as /dev/video1  (WORKS)
+cedrus soc@3000000:ve1@1c0e000: IRQ index 0 not found  (FAILS)
+cedrus soc@3000000:ve1@1c0e000: Failed to probe hardware
+```
+The SECOND node (`ve1@1c0e000`) is a duplicate created by patch 0006 or DTS overlay.
+It lacks proper IRQ definition, causing probe failure.
+
+**Fix:** Remove the duplicate `ve1@1c0e000` node from DTS. Keep only the working
+`1c0e000.ve` node (or vice-versa, ensure only ONE node exists with correct IRQ).
+Check: `refs/orange-pi-5.15-sun55iw3/arch/arm64/boot/dts/allwinner/sun55i-t527-orangepi-4a.dts`
 
 ### Profile control
 
@@ -124,70 +154,85 @@ Without CurrPic in the DPB, `output = -1` → the kernel calls
   unconditionally (zeroed when not required) to overwrite stale residual
   from no-op `MEDIA_REQUEST_IOC_REINIT`.
 
-## Kernel patches (required for P/B frame fix)
+## Kernel patches
 
-**Root cause:**
+**Root cause of hang (fixes in this session):**
 
-1. **`copied_timestamp` gate in `vb2_find_timestamp`:** O BSP T527 em
-   `drivers/media/common/videobuf2/videobuf2-v4l2.c:653`
-   exige `q->bufs[i]->copied_timestamp == 1`. A flag `copied_timestamp` é setada
-   APENAS por `v4l2_m2m_buf_copy_metadata()` no callback `device_run` do cedrus
-   (`cedrus_dec.c:86`), que roda **antes** de `cedrus_write_frame_list`.
-   **NÃO tentar setar `copied_timestamp=1` durante QBUF(CAPTURE)** — isso trava
-   o pipeline BSP T527.
+1. **`v4l2_ctrl_request_complete` called before the HW finishes:**
+   In `cedrus_device_run()`, `v4l2_ctrl_request_complete()` was called BEFORE
+   `dec_ops->trigger()`. The request would transition to COMPLETE before the
+   VE hardware even started. Userspace `poll(request_fd, POLLPRI)` returned
+   POLLPRI immediately, and the next frame's `device_run()` would overwrite
+   VE registers while the previous frame was still in progress → VE lockup.
+   **Fix:** replace `v4l2_ctrl_request_complete` in `device_run` with storing
+   the request in `ctx->current_req`. Completion moved to the IRQ handler
+   (`cedrus_irq`), AFTER the HW finishes.
+   (Patch `0005-fix-request-complete-order.patch`, 3 files: `.h`, `.dec.c`, `.hw.c`)
 
-2. **Timestamp collision on CAPTURE buffer reuse:** When a CAPTURE buffer is
-   reused for a new decode (same `dst_idx`), its `vb2_buf.timestamp` still has
-   the OLD frame's timestamp. If the old frame is still in the DPB as a
-   reference, `cedrus_write_frame_list()` matches `run->dst->vb2_buf.timestamp
-   == dpb->reference_ts`, triggering `output = position; continue;`. This uses
-   the REFERENCE's old SRAM position for the CURRENT output AND skips
-   `cedrus_fill_ref_pic` for the reference → `luma_ptr=0` → Y=0.
+2. **`MEDIA_REQUEST_IOC_REINIT` é no-op no BSP T527:** Após o request completar
+   (IRQ handler chama `v4l2_ctrl_request_complete`), o `request_fd` fica em
+   estado COMPLETE permanentemente. `media_request_reinit()` retorna 0 mas não
+   faz nada. No reuso da mesma surface, `RequestBeginPicture` tenta REINIT →
+   no-op → `QBUF(OUTPUT, request_fd=X)` com request COMPLETE → kernel aceita
+   mas nunca QUEUED → `media_request_queue` → ENOENT → hardware nunca inicia.
+   **Fix no userspace** (`src/picture.c:251-256`): `close()` o request_fd antigo
+   e deixa `RequestEndPicture` alocar um novo a cada decode.
 
-3. **`MEDIA_REQUEST_IOC_REINIT` é no-op no BSP T527.** Após o primeiro uso
-   de um `request_fd`, o request fica em estado COMPLETE e não aceita novos
-   controles. Tentar REINIT não muda o estado → `QBUF(OUTPUT)` com esse
-   `request_fd` falha → hardware nunca inicia → POLL timeout → loop infinito.
-   **Fix no userspace** (`src/picture.c:225-230`): fechar o `request_fd` antigo
-   e alocar um novo para cada decode.
+**Effect:** Sem estas correções, o ffmpeg decodifica 7 frames e trava no 8º
+(pipeline de 28 surfaces em round-robin, trava quando o request_fd reutilizado
+atinge o primeiro no-op do REINIT).
 
-**Effect:** Reference CAPTURE buffers with stale timestamps match `run->dst`
-→ SRAM position corrupted → P/B frames Y=0/garbage.
+### `refs/patch_cedrus/0006-dts-fix-cedrus-compatible.patch` (UNIFIED)
+Combines DTS fixes for T527:
+1. Fixes the `ve` node in `sun55i-t527-orangepi-4a.dts` to match the cedrus driver:
+   - Overrides `clock-names`: `"bus_ve", "ve", "mbus_ve"` → `"ahb", "mod", "ram"`
+   - Overrides `reg` with single entry (drops SRAM mbus range)
+   - Removes `reset-names`
+2. Disables duplicate `ve1@1c0e000` node that causes probe failure:
+   - Sets `status = "disabled"` for the duplicate node
+   - Prevents "IRQ index 0 not found" error from duplicate node
 
-### `refs/patch_cedrus/0006-dts-fix-cedrus-compatible.patch`
-Fixes the `ve` node in `sun55i-t527-orangepi-4a.dts` to match the cedrus driver:
-- Overrides `clock-names`: `"bus_ve", "ve", "mbus_ve"` → `"ahb", "mod", "ram"`
-  (cedrus calls `devm_clk_get(dev, "ahb")`, the Allwinner VE names are different)
-- Overrides `reg` with single entry (drops SRAM mbus range at `0x03000000`):
-  T527 uses `CEDRUS_CAPABILITY_NO_SRAM`, doesn't need the SRAM register mapping
-- Removes `reset-names` (the cedrus driver calls `devm_reset_control_get(dev, NULL)`
-  — it doesn't look up by name)
+### `refs/patch_cedrus/0005-fix-request-complete-order.patch`
+Fixes the HW lockup at frame 8+ by deferring `v4l2_ctrl_request_complete`
+from `cedrus_device_run()` to the IRQ handler (`cedrus_irq()`).
 
-### `refs/patch_cedrus/0005-cedrus-fix-vb2_find_timestamp.patch`
-Supplementary fix in `cedrus_h264.c`. 6 hunks:
+| Hunk | File | Change |
+|------|------|--------|
+| 1 | `cedrus.h` | Add `struct media_request *current_req` to `struct cedrus_ctx` |
+| 2 | `cedrus_dec.c` | Remove `v4l2_ctrl_request_complete()` from `device_run`, store `src_req` in `ctx->current_req` |
+| 3 | `cedrus_hw.c` | Call `v4l2_ctrl_request_complete(ctx->current_req)` in `cedrus_irq()` BEFORE `v4l2_m2m_buf_done_and_job_finish()` |
 
-| Hunk | Function | Change |
-|------|----------|--------|
-| 1 | `cedrus_write_frame_list` | Add `unsigned int j;` variable |
-| 2 | `cedrus_write_frame_list` | Replace `vb2_find_timestamp()` with manual `for` loop over `cap_q->bufs[j]->timestamp`, add `!= &run->dst->vb2_buf` skip to avoid timestamp collision on CAPTURE reuse |
-| 3 | `cedrus_write_frame_list` | Remove `if (run->dst->vb2_buf.timestamp == dpb->reference_ts)` block (falsely triggered by stale timestamps) |
-| 4 | `cedrus_write_frame_list` | Replace `if (output >= 0) position = output;` with unconditional `find_first_zero_bit` |
-| 5 | `_cedrus_write_ref_list` | Add `unsigned int j;` variable |
-| 6 | `_cedrus_write_ref_list` | Replace `vb2_find_timestamp()` with manual `for` loop (no `run->dst` skip needed — this function only iterates valid DPB references) |
-
-- Patch is a plain unified diff (`diff -u` format), applied with `patch -p1` from the kernel tree root.
-- Expects the **original** BSP kernel's `cedrus_h264.c` (with `vb2_find_timestamp`), NOT a pre-modified copy.
-- **CRITICAL:** If the kernel tree was previously modified (e.g., from a failed patch attempt), run `git checkout -- drivers/staging/media/sunxi/cedrus/cedrus_h264.c` first, or the patch context will not match.
+- Patch is a plain unified diff (`diff -u`)+format, applied with `patch -p1`
+- Without this patch: `device_run` completes the request before `trigger()`,
+  userspace polls POLLPRI and submits next frame while VE is still processing
+  → VE register overwrite → HW lockup on frame 8
+- `0005-cedrus-fix-vb2_find_timestamp.patch` is **NOT needed** because
+  `v4l2_m2m_buf_copy_metadata()` in `device_run` already sets
+  `copied_timestamp=1` before `cedrus_write_frame_list()` runs
 
 **To apply (via orangepi-build):**
-Copy all patches to `userpatches/kernel/sun55iw3-current/` in the orangepi-build tree.
+Copy patches 0001-0006 to `userpatches/kernel/sun55iw3-current/` in the orangepi-build tree.
 The build system applies patches with `patch -p1` in alphanumeric order: 0001 → 0006.
+**IMPORTANT:** The old `0005-cedrus-fix-vb2_find_timestamp.patch` is **obsolete** and must NOT be used.
+The correct patch 0005 is `0005-fix-request-complete-order.patch`.
 
 **To apply manually:**
+
 ```sh
 cd /home/orangepi/orangepi-build/kernel/orange-pi-5.15-sun55iw3
+
+# 1) Register T527 variant and NO_SRAM + DTS clock fix
+patch -p1 < /path/to/refs/patch_cedrus/0001-cedrus-add-sunxi-cedar-ve-compatible.patch
+patch -p1 < /path/to/refs/patch_cedrus/0002-cedrus-add-no-sram-capability.patch
+patch -p1 < /path/to/refs/patch_cedrus/0004-cedrus-skip-sram-for-t527.patch
+
+# 2) Fix request-complete order (PREVENTS HW LOCKUP)
+patch -p1 < /path/to/refs/patch_cedrus/0005-fix-request-complete-order.patch
+
+# 3) Fix DTS clock-names for cedrus compatibility
 patch -p1 < /path/to/refs/patch_cedrus/0006-dts-fix-cedrus-compatible.patch
-patch -p1 < /path/to/refs/patch_cedrus/0005-cedrus-fix-vb2_find_timestamp.patch
+
+# Rebuild module
 make M=drivers/staging/media/sunxi/cedrus modules
 sudo make M=drivers/staging/media/sunxi/cedrus modules_install
 sudo depmod -a
@@ -290,6 +335,58 @@ if (surface_object->request_fd >= 0) {
 `surface_object->request_fd < 0`.
 
 ### Fields removed (do NOT add back)
-- `capture_queued`, `is_queued_in_v4l2`, `capture_requeued` — various CAPTURE requeue attempts
+- `is_queued_in_v4l2`, `capture_requeued` — various CAPTURE requeue attempts
 - `v4l2_dequeue_buffer_nonblock()` — caused "Illegal instruction" on BSP T527
 - `total_queued_count`, `generate_deterministic_ts()`, `v4l2_drain_capture_queue()`
+
+### Bug 6: Userspace error handling on poll timeout (Session 06/05/2026)
+**Problem:** When `poll(POLLPRI)` times out after 7 frames, buffers remain queued in
+kernel. Reusing the surface causes `QBUF` to fail with EINVAL (buffer already queued).
+
+**Fixes applied (userspace):**
+1. `picture.c:358-363`: Set `capture_queued = true` after QBUF CAPTURE
+2. `picture.c:246-249`: Only clear `capture_queued` if DQBUF succeeds in `RequestBeginPicture`
+3. `surface.c:276`: Clear `capture_queued` after successful DQBUF CAPTURE
+4. `surface.c:288-298`: Error handler in `RequestSyncSurface` tries non-blocking
+   DQBUF on OUTPUT and CAPTURE buffers; only clears `capture_queued` if DQBUF CAPTURE succeeds
+5. `surface.c:298`: Set `status = VASurfaceReady` (not VASurfaceRendering) in error path
+6. `request.c:178`: Open video_fd with `O_NONBLOCK` to prevent DQBUF from blocking
+7. `media.c:118-120`: Check `POLLPRI` in revents — treat missing POLLPRI as timeout
+
+**Root cause still in kernel:** The hardware hangs after 7 frames. Log shows
+`poll rc=0 revents=0x0` (timeout). IRQ handler may not be called, or
+`v4l2_ctrl_request_complete()` may not be signaling the poll.
+
+**This session (07-09/05/2026):**
+- Patch 0006: regenerado em `diff -u` puro; desabilita `ve1@1c0e000` no DTS
+- Patch 0007: regenerado em `diff -u` limpo (debug IRQ handler)
+- Patch 0008: forward declaration de `cedrus_watchdog_callback` adicionada
+- Patch 0009: contexto `return 0` removido (função é `void`), alinhado com `}` real
+
+**Bugs corrigidos no userspace (`v4l2_translation.c`):**
+
+| Bug | Local | Sintoma | Correção |
+|---|---|---|---|
+| Bug 7: PRED_WEIGHTS condicional | `v4l2_translation.c:352` | Stale B-frame weights corrompem P-frames (Bug 2, AGENTS.md) | `translate_pred_weights()` SEMPRE chamado, `need_pred_weights = 1` fixo |
+| Bug 8: Flag `DIRECT_SPATIAL_MV_PRED` | `v4l2_translation.c:234` | Internal=0x04, kernel define=0x01 → check nunca batia, B-frame sem direct MV | `src->flags & 0x04` → `dst->flags \|= 0x01` (valores explícitos) |
+| Bug 9: Flag `SP_FOR_SWITCH` | `v4l2_translation.c:236` | Internal=0x08, kernel define=0x02 → idem, SP-frame corrompido | `src->flags & 0x08` → `dst->flags \|= 0x02` |
+
+**Problema remanescente (frames 2-5 ainda com lixo):**
+HW decodifica sem erro (IRQ status=2, todos os frames). I-frame (frame 1) OK. P/B-frames corrompidos → predição inter-quadros falhando.
+
+**Hipótese principal:** `cedrus_write_frame_list()` usa `vb2_find_timestamp()` para buscar frames de referência na fila CAPTURE. Se o buffer de referência não tem `copied_timestamp=true` ou o timestamp não corresponde, o kernel pula a referência e o HW decodifica sem ela.
+
+Veredito: `dpb_lookup` (h264.c:99-119) busca na DPB local por `picture_id`. `dpb_fill_dpb` (h264.c:194-233) itera `context->dpb.entries[i]` e preenche `decode->dpb[i]`. A ordem da iteração (índice 0→H264_DPB_SIZE) não precisa corresponder à ordem das referências do VAAPI. Mas a VAAPI pode não estar populando `VAPictureParameterBufferH264.ReferenceFrames[]` corretamente via ffmpeg.
+
+**Teste imediato:** Compilar com `ninja -C build && sudo ninja -C build install` e testar:
+```sh
+LIBVA_DRIVER_NAME=v4l2_request LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri \
+  ffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 \
+  -i "test/Cavaleiros do Zodíaco 1h.264.mp4" -vframes 10 -f null -
+```
+
+**Next steps (kernel debugging):**
+- Add `printk` to `cedrus_irq()` to verify IRQ is firing
+- Add `printk` to `cedrus_device_run()` to verify trigger is happening
+- Verify `v4l2_ctrl_request_complete()` is called in IRQ handler (patch 0005)
+- Check if HW is hanging due to incorrect V4L2 controls (SPS/PPS/SLICE/DECODE)

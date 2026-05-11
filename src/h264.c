@@ -35,6 +35,8 @@
 #include <linux/videodev2.h>
 #include "h264-ctrls.h"
 
+#include "config.h"
+#include "context.h"
 #include "request.h"
 #include "surface.h"
 #include "v4l2.h"
@@ -75,6 +77,9 @@ static struct h264_dpb_entry *dpb_find_oldest_unused_entry(struct object_context
 
 	for (i = 0; i < H264_DPB_SIZE; i++) {
 		struct h264_dpb_entry *entry = &context->dpb.entries[i];
+
+		if (entry->reserved)
+			continue;
 
 		if (!entry->used && (entry->age < min_age)) {
 			min_age = entry->age;
@@ -120,10 +125,14 @@ static struct h264_dpb_entry *dpb_lookup(struct object_context *context,
 
 static void dpb_clear_entry(struct h264_dpb_entry *entry, bool reserved)
 {
+	VAPictureH264 saved_pic = entry->pic;
+
 	memset(entry, 0, sizeof(*entry));
 
-	if (reserved)
+	if (reserved) {
 		entry->reserved = true;
+		entry->pic = saved_pic;
+	}
 }
 
 static void dpb_insert(struct object_context *context, VAPictureH264 *pic,
@@ -172,6 +181,15 @@ static void dpb_update(struct request_data *driver_data,
 		struct h264_dpb_entry *entry;
 
 		if (is_picture_null(pic))
+			continue;
+
+		/* Skip CurrPic if it appears in ReferenceFrames. Otherwise
+		 * dpb_insert below would steal the slot reserved for the
+		 * current frame's output, the kernel would see CurrPic in
+		 * the DPB, vb2_find_timestamp would return the output buffer
+		 * index, and motion comp would read from the buffer being
+		 * written -> P/B frames decode as garbage. */
+		if (pic->picture_id == parameters->CurrPic.picture_id)
 			continue;
 
 		entry = dpb_lookup(context, pic, NULL);
@@ -246,6 +264,19 @@ static void h264_va_picture_to_v4l2(struct request_data *driver_data,
 	decode->top_field_order_cnt = VAPicture->CurrPic.TopFieldOrderCnt;
 	decode->bottom_field_order_cnt = VAPicture->CurrPic.BottomFieldOrderCnt;
 
+	/*
+	 * Derivar nal_ref_idc do CurrPic.flags. cedrus_set_params seta
+	 * BIT(12) do VE_H264_SHS quando nal_ref_idc != 0 (cedrus_h264.c:423).
+	 * Sem isso, o VE trata o frame como non-reference e os dados de
+	 * referência (mv_col_buf, etc.) ficam corrompidos para frames P/B
+	 * subsequentes — apenas o I-frame decodifica corretamente.
+	 */
+	if (VAPicture->CurrPic.flags & (VA_PICTURE_H264_LONG_TERM_REFERENCE |
+					VA_PICTURE_H264_SHORT_TERM_REFERENCE))
+		decode->nal_ref_idc = 1;
+	else
+		decode->nal_ref_idc = 0;
+
 	pps->weighted_bipred_idc =
 		VAPicture->pic_fields.bits.weighted_bipred_idc;
 	pps->pic_init_qs_minus26 = VAPicture->pic_init_qs_minus26;
@@ -280,6 +311,33 @@ static void h264_va_picture_to_v4l2(struct request_data *driver_data,
 	sps->chroma_format_idc = VAPicture->seq_fields.bits.chroma_format_idc;
 	sps->bit_depth_luma_minus8 = VAPicture->bit_depth_luma_minus8;
 	sps->bit_depth_chroma_minus8 = VAPicture->bit_depth_chroma_minus8;
+	sps->max_num_ref_frames = VAPicture->num_ref_frames;
+	{
+		struct object_config *config = CONFIG(driver_data, context->config_id);
+		if (config) {
+			switch (config->profile) {
+			case VAProfileH264ConstrainedBaseline:
+				sps->profile_idc = 66;
+				sps->constraint_set_flags = 0x40;
+				break;
+			case VAProfileH264Main:
+				sps->profile_idc = 77;
+				break;
+			case VAProfileH264High:
+				sps->profile_idc = 100;
+				break;
+			case VAProfileH264MultiviewHigh:
+				sps->profile_idc = 118;
+				break;
+			case VAProfileH264StereoHigh:
+				sps->profile_idc = 128;
+				break;
+			default:
+				sps->profile_idc = 0;
+				break;
+			}
+		}
+	}
 	sps->log2_max_frame_num_minus4 =
 		VAPicture->seq_fields.bits.log2_max_frame_num_minus4;
 	sps->log2_max_pic_order_cnt_lsb_minus4 =
@@ -357,6 +415,14 @@ static void h264_va_slice_to_v4l2(struct request_data *driver_data,
 	slice->size = VASlice->slice_data_size;
 	slice->header_bit_size = VASlice->slice_data_bit_offset;
 	slice->first_mb_in_slice = VASlice->first_mb_in_slice;
+
+	/* frame_num from picture params — only field translatable from
+	 * VA-API. idr_pic_id, pic_order_cnt_lsb, delta_pic_order_cnt_*,
+	 * dec_ref_pic_marking_bit_size, pic_order_cnt_bit_size,
+	 * slice_group_change_cycle parsed from slice header bitstream by
+	 * ffmpeg but not exposed via VA-API → stay 0. cedrus_h264.c does
+	 * not read these fields, so 0 is safe. */
+	slice->frame_num = VAPicture->frame_num;
 	//slice->slice_type = VASlice->slice_type;
 
 	/* Os valores de slice_type do VAAPI coincidem com os do V4L2 BSP:

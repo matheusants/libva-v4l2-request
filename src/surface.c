@@ -71,18 +71,30 @@ VAStatus RequestCreateSurfaces2(VADriverContextP context, unsigned int format,
 		return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
 	if (!driver_data->video_format) {
+		/*
+		 * Prefer SUNXI_TILED_NV12 over NV12 on T527 BSP cedrus.
+		 * The cedrus_dst_format_set NV12 path only sets bits 4-7
+		 * (PRIMARY) of VE_PRIMARY_OUT_FMT, leaving bits 0-3
+		 * (SECONDARY_OUT_FMT_EXT) at 0 = TILED_32_NV12. The HW
+		 * writes reconstructed frames via SECONDARY for use as
+		 * inter-frame references, producing TILED data that the
+		 * next frame's motion comp reads as linear NV12 → garbage
+		 * on all P/B frames. The TILED path is consistent (PRIMARY
+		 * and SECONDARY both TILED) and image.c already converts
+		 * to linear via tiled_to_planar.
+		 */
 		found = v4l2_find_format(driver_data->video_fd,
 					 V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					 V4L2_PIX_FMT_NV12);
+					 V4L2_PIX_FMT_SUNXI_TILED_NV12);
 		if (found)
-			video_format = video_format_find(V4L2_PIX_FMT_NV12);
+			video_format = video_format_find(
+				V4L2_PIX_FMT_SUNXI_TILED_NV12);
 		else {
 			found = v4l2_find_format(driver_data->video_fd,
 						 V4L2_BUF_TYPE_VIDEO_CAPTURE,
-						 V4L2_PIX_FMT_SUNXI_TILED_NV12);
+						 V4L2_PIX_FMT_NV12);
 			if (found)
-				video_format = video_format_find(
-					V4L2_PIX_FMT_SUNXI_TILED_NV12);
+				video_format = video_format_find(V4L2_PIX_FMT_NV12);
 		}
 
 		if (video_format == NULL)
@@ -262,31 +274,43 @@ VAStatus RequestSyncSurface(VADriverContextP context, VASurfaceID surface_id)
     request_log("RequestSyncSurface: DQBUF OUTPUT rc=%d src_idx=%u\n", 
                 rc, surface_object->source_index);
 
-    rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, capture_type,
-                             surface_object->destination_index,
-                             surface_object->destination_buffers_count);
-    if (rc < 0) {
-        status = VA_STATUS_ERROR_OPERATION_FAILED;
-        goto error;
-    }
-
-    request_log("RequestSyncSurface: DQBUF CAPTURE rc=%d dst_idx=%u\n",
-                rc, surface_object->destination_index);
-
-    surface_object->status = VASurfaceDisplaying;
-    
-    status = VA_STATUS_SUCCESS; 
-
-    goto complete;
-
+     rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, capture_type,
+                              surface_object->destination_index,
+                              surface_object->destination_buffers_count);
+     if (rc < 0) {
+         status = VA_STATUS_ERROR_OPERATION_FAILED;
+         goto error;
+     }
+ 
+     request_log("RequestSyncSurface: DQBUF CAPTURE rc=%d dst_idx=%u\n",
+                 rc, surface_object->destination_index);
+ 
+     surface_object->capture_queued = false;
+     surface_object->status = VASurfaceDisplaying;
+     
+     status = VA_STATUS_SUCCESS; 
+ 
+     goto complete;
+ 
 error:
-	if (request_fd >= 0) {
-		close(request_fd);
-		surface_object->request_fd = -1;
+ 	if (request_fd >= 0) {
+ 		close(request_fd);
+ 		surface_object->request_fd = -1;
 	}
-
+	/* Tenta fazer DQBUF das buffers que podem estar presas no kernel.
+	 * Usa non-blocking (video_fd tem O_NONBLOCK). Ignora EAGAIN. */
+	v4l2_dequeue_buffer(driver_data->video_fd, -1, output_type,
+	                     surface_object->source_index, 1);
+	rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, capture_type,
+	                     surface_object->destination_index,
+	                     surface_object->destination_buffers_count);
+	/* Só limpa capture_queued se o DQBUF da CAPTURE funcionou */
+	if (rc >= 0)
+		surface_object->capture_queued = false;
+	surface_object->status = VASurfaceReady;
+ 
 complete:
-    return status;
+     return status;
 }
 
 

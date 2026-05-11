@@ -505,12 +505,27 @@ int v4l2_set_control(int video_fd, int request_fd, unsigned int id, void *data,
 	controls.controls = &control;
 	controls.count = 1;
 
-	if (request_fd >= 0) {
-		controls.which = V4L2_CTRL_WHICH_REQUEST_VAL;
-		controls.request_fd = request_fd;
-	}
+	/*
+	 * BSP T527 cedrus does NOT properly apply controls set via
+	 * V4L2_CTRL_WHICH_REQUEST_VAL — the kernel returns success but the
+	 * compound H264 controls (SPS/PPS/SLICE/DECODE/MATRIX/PRED_WEIGHTS)
+	 * are not propagated to ctx->hdl, so cedrus_find_control_data()
+	 * reads STALE values from the previous frame. I-frame decodes OK
+	 * because there's no "previous frame" yet, but every subsequent
+	 * P/B frame decodes with the I-frame's controls → garbage.
+	 *
+	 * Using CUR_VAL (which=0) applies controls IMMEDIATELY to ctx->hdl
+	 * before VIDIOC_QBUF. The Request API (MEDIA_REQUEST_IOC_QUEUE)
+	 * is still used as the trigger mechanism via QBUF's request_fd
+	 * association — only control delivery bypasses it.
+	 *
+	 * Patch 0005 (defer v4l2_ctrl_request_complete to IRQ handler)
+	 * fixes the HW lockup that the original CUR_VAL path hit, so this
+	 * path is now safe.
+	 */
+	controls.which = 0;  /* V4L2_CTRL_WHICH_CUR_VAL */
 
-	request_log("SET_CTRL id=0x%x size=%u ptr=%p\n", id, size, data);
+	request_log("SET_CTRL id=0x%x size=%u ptr=%p (CUR_VAL)\n", id, size, data);
 
 	rc = ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls);
 	if (rc < 0) {
