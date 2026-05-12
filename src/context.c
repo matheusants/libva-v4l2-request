@@ -175,9 +175,6 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 		if (ioctl(driver_data->video_fd, VIDIOC_S_CTRL, &ctrl) < 0)
 			request_log("RequestCreateContext: S_CTRL H264_PROFILE=%d "
 				    "failed: %s\n", ctrl.value, strerror(errno));
-		else
-			request_log("RequestCreateContext: H264_PROFILE set to %d\n",
-				    ctrl.value);
 		break;
 	}
 	default:
@@ -199,10 +196,6 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
                 status = VA_STATUS_ERROR_ALLOCATION_FAILED;
                 goto error;
         }
-
-	request_log("RequestCreateContext: surfaces_count=%d "
-	            "output_index_base=%u capture_index_base=%u\n",
-        	    surfaces_count, output_index_base, capture_index_base);
 
 	/* G_FMT CAPTURE to get bytesperline/sizes for mmap layout.
 	 * fmt_height is the kernel-aligned height (e.g. ALIGN(1080,32)=1088
@@ -312,9 +305,6 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
                 } else {
                         return VA_STATUS_ERROR_ALLOCATION_FAILED;
                 }
-
-		request_log("RequestCreateContext: surface_id=%d dst_idx=%u src_idx=%u\n",
-		            surfaces_ids[i], index, output_index_base + i);
 
                 surface_object->destination_index         = index;
                 surface_object->destination_planes_count  = destination_planes_count;

@@ -351,12 +351,6 @@ int h264_translate_and_set_controls(
 	translate_pred_weights(slice_proj, &pred_weights);
 	need_pred_weights = 1;
 
-	request_log("h264_translate: SPS=%zu PPS=%zu MATRIX=%zu "
-		    "PRED_WEIGHTS=%zu(send=%d) SLICE=%zu DECODE=%zu\n",
-		    sizeof(sps), sizeof(pps), sizeof(matrix),
-		    sizeof(pred_weights), need_pred_weights,
-		    sizeof(slice), sizeof(decode));
-
 	/* --- DECODE --- */
 	rc = v4l2_set_control(video_fd, request_fd,
 			      V4L2_CID_STATELESS_H264_DECODE_PARAMS,
@@ -413,6 +407,5 @@ int h264_translate_and_set_controls(
 		return -1;
 	}
 
-	request_log("h264_translate: todos os controles enviados OK\n");
 	return 0;
 }

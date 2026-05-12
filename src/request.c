@@ -177,24 +177,20 @@ VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
 	video_fd = open(video_path, O_RDWR | O_NONBLOCK);
 
 	if (video_fd < 0) {
-                perror("DEBUG: open video failed");
-                return VA_STATUS_ERROR_OPERATION_FAILED;
-        }
+		request_log("Unable to open video device\n");
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+	}
 
 	rc = v4l2_query_capabilities(video_fd, &capabilities);
 	if (rc < 0) {
-		//fprintf(stderr, "DEBUG: v4l2_query_capabilities FAILED\n");
 		status = VA_STATUS_ERROR_OPERATION_FAILED;
 		goto error;
 	}
-
-	//fprintf(stderr, "DEBUG: capabilities=0x%x\n", capabilities);
 
 	capabilities_required = V4L2_CAP_STREAMING;
 
 	if ((capabilities & capabilities_required) != capabilities_required) {
 		request_log("Missing required driver capabilities\n");
-		//fprintf(stderr, "DEBUG: missing V4L2_CAP_STREAMING\n");
 		status = VA_STATUS_ERROR_OPERATION_FAILED;
 		goto error;
 	}
@@ -204,36 +200,28 @@ VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
 
 	if (media_path) {
 		media_fd = open(media_path, O_RDWR | O_NONBLOCK);
-        	//if (media_fd >= 0) fprintf(stderr, "DEBUG: Usando media_path da ENV: %s\n", media_path);
 	}
 
-    	if (media_fd < 0) {
-        	char path[32];
-        	struct media_device_info info;
-        	for (int i = 0; i < 16; i++) {
-            	snprintf(path, sizeof(path), "/dev/media%d", i);
-            	int fd = open(path, O_RDWR | O_NONBLOCK);
-            	if (fd < 0) continue;
+	if (media_fd < 0) {
+		char path[32];
+		struct media_device_info info;
+		for (int i = 0; i < 16; i++) {
+			snprintf(path, sizeof(path), "/dev/media%d", i);
+			int fd = open(path, O_RDWR | O_NONBLOCK);
+			if (fd < 0) continue;
 
-            	if (ioctl(fd, MEDIA_IOC_DEVICE_INFO, &info) == 0) {
-                	if (strcmp(info.driver, "cedrus") == 0) {
-                    	media_fd = fd;
-                    	//fprintf(stderr, "DEBUG: Cedrus auto-detectado em %s\n", path);
-                    	break;
-                	}
-            	}
-            	close(fd);
-        	}
-    	}
-
-	/*if (media_fd < 0) {
-	        fprintf(stderr, "ERRO: Media Device do Cedrus não encontrado! Hardware transcoding falhará.\n");
-    	} */
+			if (ioctl(fd, MEDIA_IOC_DEVICE_INFO, &info) == 0) {
+				if (strcmp(info.driver, "cedrus") == 0) {
+					media_fd = fd;
+					break;
+				}
+			}
+			close(fd);
+		}
+	}
 
 	driver_data->video_fd = video_fd;
 	driver_data->media_fd = media_fd;
-
-	//fprintf(stderr, "DEBUG: init SUCCESS\n");
 
 	status = VA_STATUS_SUCCESS;
 	goto complete;

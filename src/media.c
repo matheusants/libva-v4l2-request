@@ -106,8 +106,6 @@ int media_request_wait_completion(int request_fd)
         int rc;
 
         rc = poll(&pfd, 1, 1000);
-        request_log("media_request_wait_completion: poll rc=%d revents=0x%x\n",
-                    rc, pfd.revents);
         if (rc == 0) {
                 request_log("media_request_wait_completion: timeout\n");
                 return -1;

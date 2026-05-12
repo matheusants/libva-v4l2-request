@@ -243,10 +243,6 @@ static void h264_fill_dpb(struct object_context *context,
 		if (entry->pic.flags & VA_PICTURE_H264_LONG_TERM_REFERENCE)
 			dpb->flags |= V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM;
 
-		request_log("h264_fill_dpb: entry=%d surface_id=%d "
-			    "ts=%llu flags=0x%x\n",
-			    i, entry->pic.picture_id,
-			    (unsigned long long)timestamp, dpb->flags);
 	}
 }
 

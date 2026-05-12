@@ -243,12 +243,8 @@ VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
                                                  capture_type,
                                                  surface_object->destination_index,
                                                  surface_object->destination_buffers_count);
-                request_log("RequestBeginPicture: deferred DQBUF CAPTURE "
-                            "dst_idx=%u rc=%d\n",
-                            surface_object->destination_index, dq_rc);
-                /* Só limpa a flag se o DQBUF funcionou (rc >= 0).
-                 * Se falhar (EAGAIN = hw hung), mantém capture_queued=true
-                 * para tentar novamente na próxima vez. */
+                /* Only clear flag if DQBUF succeeded; on failure keep
+                 * capture_queued=true to retry next time. */
                 if (dq_rc >= 0)
                         surface_object->capture_queued = false;
         }

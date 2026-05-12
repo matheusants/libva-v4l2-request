@@ -63,10 +63,6 @@ VAStatus RequestCreateSurfaces2(VADriverContextP context, unsigned int format,
 	VASurfaceID id;
 	bool found;
 
-	request_log(
-		"RequestCreateSurfaces2: surfaces_count=%u width=%u height=%u\n",
-		surfaces_count, width, height);
-
 	if (format != VA_RT_FORMAT_YUV420)
 		return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
@@ -233,10 +229,7 @@ VAStatus RequestSyncSurface(VADriverContextP context, VASurfaceID surface_id)
         goto error;
     }
 
-    request_log("RequestSyncSurface: surface_id=%d request_fd=%d status=%d\n",
-                surface_id, surface_object->request_fd, surface_object->status);
-
-    if (surface_object->status != VASurfaceRendering) { 
+    if (surface_object->status != VASurfaceRendering) {
         status = VA_STATUS_SUCCESS;
         goto complete;
     }
@@ -247,45 +240,34 @@ VAStatus RequestSyncSurface(VADriverContextP context, VASurfaceID surface_id)
         goto error;
     }
 
-    // Submete o request ao Media Controller
     rc = media_request_queue(request_fd);
     if (rc < 0) {
         status = VA_STATUS_ERROR_OPERATION_FAILED;
         goto error;
     }
 
-    request_log("RequestSyncSurface: surface_id=0x%x before wait\n", surface_id);
-    
-    // Aguarda o hardware terminar o processamento
-    rc = media_request_wait_completion(request_fd); 
-    request_log("RequestSyncSurface: after wait rc=%d\n", rc); 
+    rc = media_request_wait_completion(request_fd);
     if (rc < 0) {
         status = VA_STATUS_ERROR_OPERATION_FAILED;
         goto error;
     }
 
-    rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, output_type, 
+    rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, output_type,
                              surface_object->source_index, 1);
-	if (rc < 0) {
-		status = VA_STATUS_ERROR_OPERATION_FAILED;
-		goto error;
-	}							 
-    
-    request_log("RequestSyncSurface: DQBUF OUTPUT rc=%d src_idx=%u\n", 
-                rc, surface_object->source_index);
+    if (rc < 0) {
+        status = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto error;
+    }
 
-     rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, capture_type,
-                              surface_object->destination_index,
-                              surface_object->destination_buffers_count);
-     if (rc < 0) {
-         status = VA_STATUS_ERROR_OPERATION_FAILED;
-         goto error;
-     }
- 
-     request_log("RequestSyncSurface: DQBUF CAPTURE rc=%d dst_idx=%u\n",
-                 rc, surface_object->destination_index);
- 
-     surface_object->capture_queued = false;
+    rc = v4l2_dequeue_buffer(driver_data->video_fd, -1, capture_type,
+                             surface_object->destination_index,
+                             surface_object->destination_buffers_count);
+    if (rc < 0) {
+        status = VA_STATUS_ERROR_OPERATION_FAILED;
+        goto error;
+    }
+
+    surface_object->capture_queued = false;
      surface_object->status = VASurfaceDisplaying;
      
      status = VA_STATUS_SUCCESS; 

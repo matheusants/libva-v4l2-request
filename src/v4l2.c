@@ -161,9 +161,6 @@ int v4l2_set_format(int video_fd, unsigned int type, unsigned int pixelformat,
 {
 	struct v4l2_format format;
 	int rc;
-	request_log("SET_FMT type=%d pixelformat=%c%c%c%c\n", type,
-		    pixelformat & 0xFF, (pixelformat >> 8) & 0xFF,
-		    (pixelformat >> 16) & 0xFF, (pixelformat >> 24) & 0xFF);
 
 	v4l2_setup_format(&format, type, width, height, pixelformat);
 
@@ -405,14 +402,7 @@ int v4l2_dequeue_buffer(int video_fd, int request_fd, unsigned int type,
 		return -1;
 	}
 
-	request_log("v4l2_dequeue_buffer: type=%u dequeued index=%u ts=%llu\n",
-		    type, buffer.index,
-		    (unsigned long long)v4l2_timeval_to_ns(&buffer.timestamp));
-
 	return buffer.index;
-
-	/* Sugestão Claude Patch 1.02 - REMOVER
-	return 0; */
 }
 
 int v4l2_export_buffer(int video_fd, unsigned int type, unsigned int index,
@@ -524,8 +514,6 @@ int v4l2_set_control(int video_fd, int request_fd, unsigned int id, void *data,
 	 * path is now safe.
 	 */
 	controls.which = 0;  /* V4L2_CTRL_WHICH_CUR_VAL */
-
-	request_log("SET_CTRL id=0x%x size=%u ptr=%p (CUR_VAL)\n", id, size, data);
 
 	rc = ioctl(video_fd, VIDIOC_S_EXT_CTRLS, &controls);
 	if (rc < 0) {

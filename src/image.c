@@ -155,16 +155,7 @@ static VAStatus copy_surface_to_image (struct request_data *driver_data,
 	if (buffer_object == NULL)
 		return VA_STATUS_ERROR_INVALID_BUFFER;
 
-	request_log("copy_surface_to_image: surface status=%d planes=%u\n",
-	            surface_object->status,
-	            surface_object->destination_planes_count);
-
 	for (i = 0; i < surface_object->destination_planes_count; i++) {
-		request_log("copy_surface_to_image: plane=%u data=%p size=%u offset=%u\n",
-	                    i,
-	                    surface_object->destination_data[i],
-	                    surface_object->destination_sizes[i],
-			    surface_object->destination_offsets[i]);
 		if (!video_format_is_linear(driver_data->video_format))
 			tiled_to_planar(surface_object->destination_data[i],
 					buffer_object->data + image->offsets[i],
