@@ -41,6 +41,7 @@ sources = [
 #	'tiled_yuv.S',
 #	'tiled_yuv_c.c',
 	'tiled_yuv_aarch64.S',
+	'tiled_yuv_mt.c',
 	'video.c',
 	'media.c',
 	'v4l2.c',
@@ -89,7 +90,8 @@ cflags = [
 deps = [
 	kernel_headers_dep,
 	libva_dep,
-	libdrm_dep
+	libdrm_dep,
+	dependency('threads')
 ]
 
 v4l2_request_drv_video = shared_module('v4l2_request_drv_video',

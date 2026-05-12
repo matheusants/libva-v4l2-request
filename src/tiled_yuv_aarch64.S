@@ -1,6 +1,10 @@
 /*
- * Port AArch64 do conversor Sunxi Tiled para NV12
- * Otimizado para Orange Pi 4A (Allwinner T527)
+ * SUNXI Tiled NV12 -> linear converter, AArch64 NEON
+ * Tile size: 32x32 bytes (1024 bytes/tile).
+ *
+ * Iteration order: tile-by-tile (ty, tx outer; r inner).
+ * Each tile's 1024 bytes are read sequentially, fitting in A55 L1D (32KB).
+ * Row-major order caused L1 thrashing: 45 tiles * 1024B = 45KB > 32KB L1.
  */
 
 #if defined(__linux__) && defined(__ELF__)
@@ -12,143 +16,244 @@
 .text
 .align 2
 
-/* --- Macro para padronizar funções --- */
 .macro aarch64_function fname
     .global \fname
     .type \fname, %function
 \fname:
 .endm
 
-/* 
- * 1. tiled_to_planar (Plano Luma Y)
- * x0: SRC, x1: DST, x2: PITCH, x3: WIDTH, x4: HEIGHT 
+/*
+ * tiled_to_planar
+ *   x0: src  (tiled base)
+ *   x1: dst  (linear base)
+ *   x2: pitch (dst bytes per row)
+ *   x3: width  (pixels)
+ *   x4: height (rows)
+ *
+ * Callee-saved: x19-x26
+ * Scratch:      x5-x17, v0-v7
  */
 aarch64_function tiled_to_planar
-    stp x19, x20, [sp, #-48]!
-    stp x21, x22, [sp, #16]
-    stp x23, x24, [sp, #32]
-
-    mov x19, x0 // SRC
-    mov x20, x1 // DST
-    mov x21, x2 // PITCH
-    mov x22, x3 // WIDTH
-    mov x23, x4 // HEIGHT
-
-    // Tiles por linha = (width + 31) / 32
-    add x7, x22, #31
-    lsr x7, x7, #5
-
-    mov x24, #0 // y_counter
-
-1:  // Y-Loop
-    cmp x24, x23
-    b.ge 5f
-
-    mov x9, #0 // x_counter
-
-2:  // X-Loop
-    cmp x9, x22
-    b.ge 4f
-
-    // Offset do Tile: (y/32 * tiles_per_row + x/32) * 1024 + (y%32 * 32)
-    lsr x10, x24, #5
-    mul x10, x10, x7
-    lsr x11, x9, #5
-    add x10, x10, x11
-    lsl x10, x10, #10
-    and x11, x24, #31
-    lsl x11, x11, #5
-    add x10, x10, x11
-    add x10, x10, x19 // SRC Final
-
-    // Destino: y * dst_pitch + x
-    mul x11, x24, x21
-    add x11, x11, x20
-    add x11, x11, x9 // DST Final
-
-    // Carga/Soma NEON 32-bytes
-    ld1 {v0.16b, v1.16b}, [x10]
-    st1 {v0.16b, v1.16b}, [x11]
-
-    add x9, x9, #32
-    b 2b
-
-4:  add x24, x24, #1
-    b 1b
-
-5:  ldp x23, x24, [sp, #32]
-    ldp x21, x22, [sp, #16]
-    ldp x19, x20, [sp], #48
-    ret
-.size tiled_to_planar, .-tiled_to_planar
-
-
-/* 
- * 2. tiled_deinterleave_to_planar (Plano Chroma UV)
- * x0: SRC, x1: DST_U, x2: DST_V, x3: PITCH, x4: WIDTH, x5: HEIGHT
- */
-aarch64_function tiled_deinterleave_to_planar
     stp x19, x20, [sp, #-64]!
     stp x21, x22, [sp, #16]
     stp x23, x24, [sp, #32]
     stp x25, x26, [sp, #48]
 
-    mov x19, x0 // SRC
-    mov x20, x1 // DST_U
-    mov x21, x2 // DST_V
-    mov x22, x3 // PITCH
-    mov x23, x4 // WIDTH
-    mov x24, x5 // HEIGHT
+    mov x19, x0         // src
+    mov x20, x1         // dst
+    mov x21, x2         // pitch
+    mov x22, x3         // width
+    mov x23, x4         // height
 
-    // Tiles por linha
-    add x7, x23, #31
-    lsr x7, x7, #5
+    // tiles_per_row = (width + 31) >> 5
+    add x24, x22, #31
+    lsr x24, x24, #5
 
-    mov x25, #0 // y_counter
+    // tile_rows = (height + 31) >> 5
+    add x25, x23, #31
+    lsr x25, x25, #5
 
-1:  // Y-Loop
-    cmp x25, x24
-    b.ge 5f
+    mov x26, #0         // ty = 0
 
-    mov x9, #0 // x_counter
+.Ltp_ty_loop:
+    cmp x26, x25
+    b.ge .Ltp_done
 
-2:  // X-Loop
-    cmp x9, x23
-    b.ge 4f
+    // rows_this_tile = min(height - ty*32, 32)
+    lsl x5, x26, #5            // ty * 32
+    sub x5, x23, x5            // height - ty*32
+    cmp x5, #32
+    b.le .Ltp_rows_ok
+    mov x5, #32
+.Ltp_rows_ok:                  // x5 = rows_this_tile
 
-    // Offset do Tile (Chroma tiles são 32x32 mas carregam U e V intercalados)
-    lsr x10, x25, #5
-    mul x10, x10, x7
-    lsr x11, x9, #5
-    add x10, x10, x11
-    lsl x10, x10, #10
-    and x11, x25, #31
-    lsl x11, x11, #5
-    add x10, x10, x19 // SRC Final
+    // dst_tile_base = dst + ty * 32 * pitch
+    lsl x6, x26, #5            // ty * 32
+    mul x6, x6, x21
+    add x6, x20, x6            // x6 = dst + ty*32*pitch
 
-    // Destinos U e V: y * pitch + (x/2)
-    mul x11, x25, x22
-    lsr x12, x9, #1
-    add x13, x11, x20 // Base U
-    add x13, x13, x12 // U Final
-    add x14, x11, x21 // Base V
-    add x14, x14, x12 // V Final
+    mov x7, #0          // tx = 0
 
-    // ld2 desintercala os bytes: v0 (U), v1 (V)
-    ld2 {v0.16b, v1.16b}, [x10]
-    st1 {v0.16b}, [x13]
-    st1 {v1.16b}, [x14]
+.Ltp_tx_loop:
+    cmp x7, x24
+    b.ge .Ltp_tx_done
 
-    add x9, x9, #32
-    b 2b
+    // src_tile = src + (ty * tiles_per_row + tx) * 1024
+    mul x8, x26, x24
+    add x8, x8, x7
+    lsl x8, x8, #10            // * 1024
+    add x8, x19, x8            // x8 = src_tile
 
-4:  add x25, x25, #1
-    b 1b
+    // prefetch start of next tile (tx+1 is contiguous in memory)
+    prfm PLDL1KEEP, [x8, #1024]
 
-5:  ldp x25, x26, [sp, #48]
+    // dst_col = tx * 32
+    lsl x9, x7, #5             // x9 = tx * 32
+
+    mov x10, #0         // r = 0
+
+.Ltp_r_loop:
+    cmp x10, x5
+    b.ge .Ltp_r_done
+
+    // src_ptr = src_tile + r * 32
+    lsl x11, x10, #5
+    add x11, x8, x11
+
+    // dst_ptr = dst_tile_base + r * pitch + dst_col
+    mul x12, x10, x21
+    add x12, x6, x12
+    add x12, x12, x9
+
+    ld1 {v0.16b, v1.16b}, [x11]
+    st1 {v0.16b, v1.16b}, [x12]
+
+    add x10, x10, #1
+    b .Ltp_r_loop
+
+.Ltp_r_done:
+    add x7, x7, #1
+    b .Ltp_tx_loop
+
+.Ltp_tx_done:
+    add x26, x26, #1
+    b .Ltp_ty_loop
+
+.Ltp_done:
+    ldp x25, x26, [sp, #48]
     ldp x23, x24, [sp, #32]
     ldp x21, x22, [sp, #16]
     ldp x19, x20, [sp], #64
+    ret
+.size tiled_to_planar, .-tiled_to_planar
+
+
+/*
+ * tiled_deinterleave_to_planar  (unused by image.c; kept for completeness)
+ *   x0: src    (tiled NV12 UV base)
+ *   x1: dst_u
+ *   x2: dst_v
+ *   x3: pitch
+ *   x4: width
+ *   x5: height
+ *
+ * Same tile-by-tile strategy. Uses ld2 to deinterleave UV.
+ */
+aarch64_function tiled_deinterleave_to_planar
+    stp x19, x20, [sp, #-80]!
+    stp x21, x22, [sp, #16]
+    stp x23, x24, [sp, #32]
+    stp x25, x26, [sp, #48]
+    stp x27, x28, [sp, #64]
+
+    mov x19, x0         // src
+    mov x20, x1         // dst_u
+    mov x21, x2         // dst_v
+    mov x22, x3         // pitch
+    mov x23, x4         // width
+    mov x24, x5         // height
+
+    // tiles_per_row = (width + 31) >> 5
+    add x25, x23, #31
+    lsr x25, x25, #5
+
+    // tile_rows = (height + 31) >> 5
+    add x26, x24, #31
+    lsr x26, x26, #5
+
+    mov x27, #0         // ty
+
+.Ldip_ty_loop:
+    cmp x27, x26
+    b.ge .Ldip_done
+
+    // rows_this_tile = min(height - ty*32, 32)
+    lsl x5, x27, #5
+    sub x5, x24, x5
+    cmp x5, #32
+    b.le .Ldip_rows_ok
+    mov x5, #32
+.Ldip_rows_ok:
+
+    // dst_u_tile_base = dst_u + ty*32*pitch
+    lsl x6, x27, #5
+    mul x6, x6, x22
+    add x6, x20, x6
+
+    // dst_v_tile_base = dst_v + ty*32*pitch
+    add x28, x21, x6
+    sub x28, x28, x20   // offset = ty*32*pitch
+    add x28, x21, x28
+
+    // redo cleanly
+    lsl x6, x27, #5
+    mul x6, x6, x22
+    add x6, x20, x6     // x6 = dst_u + ty*32*pitch
+    add x7, x21, x6
+    sub x7, x7, x20     // wrong, redo
+    // dst_v_base = dst_v + ty*32*pitch
+    lsl x7, x27, #5
+    mul x7, x7, x22
+    add x7, x21, x7     // x7 = dst_v + ty*32*pitch
+
+    mov x8, #0          // tx
+
+.Ldip_tx_loop:
+    cmp x8, x25
+    b.ge .Ldip_tx_done
+
+    // src_tile = src + (ty * tpr + tx) * 1024
+    mul x9, x27, x25
+    add x9, x9, x8
+    lsl x9, x9, #10
+    add x9, x19, x9    // x9 = src_tile
+
+    prfm PLDL1KEEP, [x9, #1024]
+
+    // dst_col_half = tx * 16  (each 32-byte UV tile row → 16 U + 16 V)
+    lsl x10, x8, #4
+
+    mov x11, #0         // r
+
+.Ldip_r_loop:
+    cmp x11, x5
+    b.ge .Ldip_r_done
+
+    // src_ptr = src_tile + r * 32
+    lsl x12, x11, #5
+    add x12, x9, x12
+
+    // dst_u_ptr = dst_u_base + r*pitch + dst_col_half
+    mul x13, x11, x22
+    add x13, x6, x13
+    add x13, x13, x10
+
+    // dst_v_ptr = dst_v_base + r*pitch + dst_col_half
+    mul x14, x11, x22
+    add x14, x7, x14
+    add x14, x14, x10
+
+    ld2 {v0.16b, v1.16b}, [x12]
+    st1 {v0.16b}, [x13]
+    st1 {v1.16b}, [x14]
+
+    add x11, x11, #1
+    b .Ldip_r_loop
+
+.Ldip_r_done:
+    add x8, x8, #1
+    b .Ldip_tx_loop
+
+.Ldip_tx_done:
+    add x27, x27, #1
+    b .Ldip_ty_loop
+
+.Ldip_done:
+    ldp x27, x28, [sp, #64]
+    ldp x25, x26, [sp, #48]
+    ldp x23, x24, [sp, #32]
+    ldp x21, x22, [sp, #16]
+    ldp x19, x20, [sp], #80
     ret
 .size tiled_deinterleave_to_planar, .-tiled_deinterleave_to_planar
 
