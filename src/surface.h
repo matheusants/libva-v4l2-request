@@ -54,6 +54,7 @@ struct object_surface {
 	void *destination_map[VIDEO_MAX_PLANES];
 	unsigned int destination_map_lengths[VIDEO_MAX_PLANES];
 	unsigned int destination_map_offsets[VIDEO_MAX_PLANES];
+	int destination_dmabuf_fd[VIDEO_MAX_PLANES];
 	void *destination_data[VIDEO_MAX_PLANES];
 	unsigned int destination_sizes[VIDEO_MAX_PLANES];
 	unsigned int destination_offsets[VIDEO_MAX_PLANES];

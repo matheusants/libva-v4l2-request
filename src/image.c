@@ -33,6 +33,8 @@
 
 #include <assert.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <linux/dma-buf.h>
 
 #include "tiled_yuv.h"
 #include "utils.h"
@@ -144,9 +146,20 @@ VAStatus RequestDestroyImage(VADriverContextP context, VAImageID image_id)
 	return VA_STATUS_SUCCESS;
 }
 
-static VAStatus copy_surface_to_image (struct request_data *driver_data,
-				       struct object_surface *surface_object,
-				       VAImage *image)
+static void dmabuf_sync(struct object_surface *surface_object, __u64 flags)
+{
+	struct dma_buf_sync sync = { .flags = flags };
+	unsigned int j;
+
+	for (j = 0; j < surface_object->destination_buffers_count; j++)
+		if (surface_object->destination_dmabuf_fd[j] >= 0)
+			ioctl(surface_object->destination_dmabuf_fd[j],
+			      DMA_BUF_IOCTL_SYNC, &sync);
+}
+
+static VAStatus copy_surface_to_image(struct request_data *driver_data,
+				      struct object_surface *surface_object,
+				      VAImage *image)
 {
 	struct object_buffer *buffer_object;
 	unsigned int i;
@@ -154,6 +167,8 @@ static VAStatus copy_surface_to_image (struct request_data *driver_data,
 	buffer_object = BUFFER(driver_data, image->buf);
 	if (buffer_object == NULL)
 		return VA_STATUS_ERROR_INVALID_BUFFER;
+
+	dmabuf_sync(surface_object, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
 
 	for (i = 0; i < surface_object->destination_planes_count; i++) {
 		if (!video_format_is_linear(driver_data->video_format))
@@ -167,6 +182,8 @@ static VAStatus copy_surface_to_image (struct request_data *driver_data,
 			       surface_object->destination_data[i],
 			       surface_object->destination_sizes[i]);
 	}
+
+	dmabuf_sync(surface_object, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
 
 	return VA_STATUS_SUCCESS;
 }

@@ -139,6 +139,8 @@ VAStatus RequestCreateSurfaces2(VADriverContextP context, unsigned int format,
 		       sizeof(surface_object->destination_map_lengths));
 		memset(surface_object->destination_map_offsets, 0,
 		       sizeof(surface_object->destination_map_offsets));
+		for (unsigned int k = 0; k < VIDEO_MAX_PLANES; k++)
+			surface_object->destination_dmabuf_fd[k] = -1;
 		memset(surface_object->destination_data, 0,
 		       sizeof(surface_object->destination_data));
 		memset(surface_object->destination_sizes, 0,
@@ -186,12 +188,16 @@ VAStatus RequestDestroySurfaces(VADriverContextP context,
 			munmap(surface_object->source_data,
 			       surface_object->source_size);
 
-		for (j = 0; j < surface_object->destination_buffers_count; j++)
+		for (j = 0; j < surface_object->destination_buffers_count; j++) {
 			if (surface_object->destination_map[j] != NULL &&
 			    surface_object->destination_map_lengths[j] > 0)
 				munmap(surface_object->destination_map[j],
-				       surface_object
-					       ->destination_map_lengths[j]);
+				       surface_object->destination_map_lengths[j]);
+			if (surface_object->destination_dmabuf_fd[j] >= 0) {
+				close(surface_object->destination_dmabuf_fd[j]);
+				surface_object->destination_dmabuf_fd[j] = -1;
+			}
+		}
 
 		if (surface_object->request_fd > 0)
 			close(surface_object->request_fd);

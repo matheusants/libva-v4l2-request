@@ -35,6 +35,7 @@
 
 #include <assert.h>
 
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
@@ -271,6 +272,35 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
                                 goto error;
                         }
                 }
+
+                /* Export CAPTURE buffers as dma-buf and remap via dmabuf fd.
+                 * dma-buf mmap may yield a cached/WC mapping (vs. Device/NC
+                 * from video_fd mmap), enabling DMA_BUF_IOCTL_SYNC-coherent
+                 * fast CPU reads after VE decode. Falls back to original map
+                 * on EXPBUF or remap failure. */
+		{
+			int export_fds[VIDEO_MAX_PLANES];
+			unsigned int k;
+			for (k = 0; k < VIDEO_MAX_PLANES; k++)
+				export_fds[k] = -1;
+			if (v4l2_export_buffer(driver_data->video_fd, capture_type,
+					       index, O_RDWR, export_fds,
+					       video_format->v4l2_buffers_count) == 0) {
+				for (k = 0; k < video_format->v4l2_buffers_count; k++) {
+					surface_object->destination_dmabuf_fd[k] =
+						export_fds[k];
+					void *remap = mmap(NULL,
+						surface_object->destination_map_lengths[k],
+						PROT_READ | PROT_WRITE,
+						MAP_SHARED, export_fds[k], 0);
+					if (remap != MAP_FAILED) {
+						munmap(surface_object->destination_map[k],
+						       surface_object->destination_map_lengths[k]);
+						surface_object->destination_map[k] = remap;
+					}
+				}
+			}
+		}
 
                 /* Compute logical plane layout inside the mmap'd buffer(s) */
 		if (video_format->v4l2_buffers_count == 1) {
