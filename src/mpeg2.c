@@ -27,7 +27,6 @@
 #include "context.h"
 #include "request.h"
 #include "surface.h"
-#include "h264-ctrls.h"
 
 #include <assert.h>
 #include <string.h>
@@ -36,7 +35,7 @@
 #include <sys/mman.h>
 
 #include <linux/videodev2.h>
-#include <mpeg2-ctrls.h>
+#include <linux/v4l2-controls.h>
 
 #include "v4l2.h"
 
@@ -46,109 +45,106 @@ int mpeg2_set_controls(struct request_data *driver_data,
 {
 	VAPictureParameterBufferMPEG2 *picture =
 		&surface_object->params.mpeg2.picture;
-	VASliceParameterBufferMPEG2 *slice =
-		&surface_object->params.mpeg2.slice;
 	VAIQMatrixBufferMPEG2 *iqmatrix =
 		&surface_object->params.mpeg2.iqmatrix;
 	bool iqmatrix_set = surface_object->params.mpeg2.iqmatrix_set;
-	struct v4l2_ctrl_mpeg2_slice_params slice_params;
-	struct v4l2_ctrl_mpeg2_quantization quantization;
-	struct object_surface *forward_reference_surface;
-	struct object_surface *backward_reference_surface;
-	uint64_t timestamp;
+	struct v4l2_ctrl_mpeg2_sequence seq;
+	struct v4l2_ctrl_mpeg2_picture pic;
+	struct v4l2_ctrl_mpeg2_quantisation quant;
+	struct object_surface *forward_surface;
+	struct object_surface *backward_surface;
 	unsigned int i;
 	int rc;
 
-	memset(&slice_params, 0, sizeof(slice_params));
+	/* SEQUENCE */
 
-	slice_params.bit_size = surface_object->slices_size * 8;
-	slice_params.data_bit_offset = 0;
+	memset(&seq, 0, sizeof(seq));
 
-	slice_params.sequence.horizontal_size = picture->horizontal_size;
-	slice_params.sequence.vertical_size = picture->vertical_size;
-	slice_params.sequence.vbv_buffer_size = SOURCE_SIZE_MAX;
-
-	slice_params.sequence.profile_and_level_indication = 0;
-	slice_params.sequence.progressive_sequence = 0;
-	slice_params.sequence.chroma_format = 1; // 4:2:0
-
-	slice_params.picture.picture_coding_type = picture->picture_coding_type;
-	slice_params.picture.f_code[0][0] = (picture->f_code >> 12) & 0x0f;
-	slice_params.picture.f_code[0][1] = (picture->f_code >> 8) & 0x0f;
-	slice_params.picture.f_code[1][0] = (picture->f_code >> 4) & 0x0f;
-	slice_params.picture.f_code[1][1] = (picture->f_code >> 0) & 0x0f;
-
-	slice_params.picture.intra_dc_precision =
-		picture->picture_coding_extension.bits.intra_dc_precision;
-	slice_params.picture.picture_structure =
-		picture->picture_coding_extension.bits.picture_structure;
-	slice_params.picture.top_field_first =
-		picture->picture_coding_extension.bits.top_field_first;
-	slice_params.picture.frame_pred_frame_dct =
-		picture->picture_coding_extension.bits.frame_pred_frame_dct;
-	slice_params.picture.concealment_motion_vectors =
-		picture->picture_coding_extension.bits
-			.concealment_motion_vectors;
-	slice_params.picture.q_scale_type =
-		picture->picture_coding_extension.bits.q_scale_type;
-	slice_params.picture.intra_vlc_format =
-		picture->picture_coding_extension.bits.intra_vlc_format;
-	slice_params.picture.alternate_scan =
-		picture->picture_coding_extension.bits.alternate_scan;
-	slice_params.picture.repeat_first_field =
-		picture->picture_coding_extension.bits.repeat_first_field;
-	slice_params.picture.progressive_frame =
-		picture->picture_coding_extension.bits.progressive_frame;
-
-	slice_params.quantiser_scale_code = slice->quantiser_scale_code;
-
-	forward_reference_surface =
-		SURFACE(driver_data, picture->forward_reference_picture);
-	if (forward_reference_surface == NULL)
-		forward_reference_surface = surface_object;
-
-	timestamp = v4l2_timeval_to_ns(&forward_reference_surface->timestamp);
-	slice_params.forward_ref_ts = timestamp;
-
-	backward_reference_surface =
-		SURFACE(driver_data, picture->backward_reference_picture);
-	if (backward_reference_surface == NULL)
-		backward_reference_surface = surface_object;
-
-	timestamp = v4l2_timeval_to_ns(&backward_reference_surface->timestamp);
-	slice_params.backward_ref_ts = timestamp;
+	seq.horizontal_size = picture->horizontal_size;
+	seq.vertical_size = picture->vertical_size;
+	seq.vbv_buffer_size = SOURCE_SIZE_MAX;
+	seq.profile_and_level_indication = 0;
+	seq.chroma_format = 1; /* 4:2:0 */
+	/* progressive_sequence=0 → no V4L2_MPEG2_SEQ_FLAG_PROGRESSIVE */
 
 	rc = v4l2_set_control(driver_data->video_fd, surface_object->request_fd,
-			      V4L2_CID_MPEG_VIDEO_MPEG2_SLICE_PARAMS,
-			      &slice_params, sizeof(slice_params));
+			      V4L2_CID_STATELESS_MPEG2_SEQUENCE,
+			      &seq, sizeof(seq));
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
+	/* PICTURE */
+
+	memset(&pic, 0, sizeof(pic));
+
+	forward_surface = SURFACE(driver_data,
+				  picture->forward_reference_picture);
+	if (forward_surface == NULL)
+		forward_surface = surface_object;
+
+	backward_surface = SURFACE(driver_data,
+				   picture->backward_reference_picture);
+	if (backward_surface == NULL)
+		backward_surface = surface_object;
+
+	pic.forward_ref_ts  = v4l2_timeval_to_ns(&forward_surface->timestamp);
+	pic.backward_ref_ts = v4l2_timeval_to_ns(&backward_surface->timestamp);
+
+	pic.picture_coding_type = picture->picture_coding_type;
+	pic.f_code[0][0] = (picture->f_code >> 12) & 0x0f;
+	pic.f_code[0][1] = (picture->f_code >> 8)  & 0x0f;
+	pic.f_code[1][0] = (picture->f_code >> 4)  & 0x0f;
+	pic.f_code[1][1] = (picture->f_code >> 0)  & 0x0f;
+	pic.intra_dc_precision =
+		picture->picture_coding_extension.bits.intra_dc_precision;
+	pic.picture_structure =
+		picture->picture_coding_extension.bits.picture_structure;
+
+	if (picture->picture_coding_extension.bits.top_field_first)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_TOP_FIELD_FIRST;
+	if (picture->picture_coding_extension.bits.frame_pred_frame_dct)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_FRAME_PRED_DCT;
+	if (picture->picture_coding_extension.bits.concealment_motion_vectors)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_CONCEALMENT_MV;
+	if (picture->picture_coding_extension.bits.q_scale_type)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_Q_SCALE_TYPE;
+	if (picture->picture_coding_extension.bits.intra_vlc_format)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_INTRA_VLC;
+	if (picture->picture_coding_extension.bits.alternate_scan)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_ALT_SCAN;
+	if (picture->picture_coding_extension.bits.repeat_first_field)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_REPEAT_FIRST;
+	if (picture->picture_coding_extension.bits.progressive_frame)
+		pic.flags |= V4L2_MPEG2_PIC_FLAG_PROGRESSIVE;
+
+	rc = v4l2_set_control(driver_data->video_fd, surface_object->request_fd,
+			      V4L2_CID_STATELESS_MPEG2_PICTURE,
+			      &pic, sizeof(pic));
+	if (rc < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	/* QUANTISATION — send only when custom matrices provided */
+
 	if (iqmatrix_set) {
-		quantization.load_intra_quantiser_matrix =
-			iqmatrix->load_intra_quantiser_matrix;
-		quantization.load_non_intra_quantiser_matrix =
-			iqmatrix->load_non_intra_quantiser_matrix;
-		quantization.load_chroma_intra_quantiser_matrix =
-			iqmatrix->load_chroma_intra_quantiser_matrix;
-		quantization.load_chroma_non_intra_quantiser_matrix =
-			iqmatrix->load_chroma_non_intra_quantiser_matrix;
+		memset(&quant, 0, sizeof(quant));
 
 		for (i = 0; i < 64; i++) {
-			quantization.intra_quantiser_matrix[i] =
+			quant.intra_quantiser_matrix[i] =
 				iqmatrix->intra_quantiser_matrix[i];
-			quantization.non_intra_quantiser_matrix[i] =
+			quant.non_intra_quantiser_matrix[i] =
 				iqmatrix->non_intra_quantiser_matrix[i];
-			quantization.chroma_intra_quantiser_matrix[i] =
+			quant.chroma_intra_quantiser_matrix[i] =
 				iqmatrix->chroma_intra_quantiser_matrix[i];
-			quantization.chroma_non_intra_quantiser_matrix[i] =
+			quant.chroma_non_intra_quantiser_matrix[i] =
 				iqmatrix->chroma_non_intra_quantiser_matrix[i];
 		}
 
 		rc = v4l2_set_control(driver_data->video_fd,
 				      surface_object->request_fd,
-				      V4L2_CID_MPEG_VIDEO_MPEG2_QUANTIZATION,
-				      &quantization, sizeof(quantization));
+				      V4L2_CID_STATELESS_MPEG2_QUANTISATION,
+				      &quant, sizeof(quant));
+		if (rc < 0)
+			return VA_STATUS_ERROR_OPERATION_FAILED;
 	}
 
 	return 0;

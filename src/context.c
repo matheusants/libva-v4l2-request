@@ -204,8 +204,11 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 	            "output_index_base=%u capture_index_base=%u\n",
         	    surfaces_count, output_index_base, capture_index_base);
 
-	/* G_FMT CAPTURE to get bytesperline/sizes for mmap layout */
-        rc = v4l2_get_format(driver_data->video_fd, capture_type, NULL, NULL,
+	/* G_FMT CAPTURE to get bytesperline/sizes for mmap layout.
+	 * fmt_height is the kernel-aligned height (e.g. ALIGN(1080,32)=1088
+	 * for TILED), which determines where the chroma plane actually starts. */
+	unsigned int fmt_height = 0;
+        rc = v4l2_get_format(driver_data->video_fd, capture_type, NULL, &fmt_height,
                              destination_bytesperlines, destination_sizes, NULL);
         if (rc < 0) {
                 request_log("RequestCreateContext: G_FMT CAPTURE failed\n");
@@ -278,7 +281,9 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 
                 /* Compute logical plane layout inside the mmap'd buffer(s) */
 		if (video_format->v4l2_buffers_count == 1) {
-                	destination_sizes[0] = destination_bytesperlines[0] * picture_height;
+			/* Use kernel-reported fmt_height (aligned) so chroma offset
+			 * matches kernel's cedrus_buf_addr(plane=1) computation. */
+                	destination_sizes[0] = destination_bytesperlines[0] * fmt_height;
 
                        	for (j = 1; j < destination_planes_count; j++)
                        		destination_sizes[j] = destination_sizes[0] / 2;
