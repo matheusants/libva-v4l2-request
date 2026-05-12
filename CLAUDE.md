@@ -108,7 +108,7 @@ Live patches: `/home/orangepi/orangepi-build/userpatches/kernel/sun55iw3-current
 Applied alphabetically by orangepi-build. Generated via `git diff HEAD` on kernel tree,
 stripped of `diff --git` / `index` lines so `patch -p1` applies cleanly.
 
-Consolidated patches (6 files, replacing 15 individual patches):
+Consolidated patches (7 files, replacing 15 individual patches):
 
 | Patch | File | Purpose |
 |---|---|---|
@@ -118,6 +118,7 @@ Consolidated patches (6 files, replacing 15 individual patches):
 | 0004-t527-cedrus-h264 | cedrus_h264.c | Skip pic_list pos 0 + re-apply dst_format + MIXED_RAM bufs |
 | 0005-t527-cedrus-mpeg2 | cedrus_mpeg2.c | Re-apply dst_format after engine_enable |
 | 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clock-names/iommus master 2/disable duplicate ve1 |
+| 0007-t527-cedrus-capture-dma-sg | cedrus.h + cedrus_video.c + Kconfig | CAPTURE queue vb2_dma_sg → cacheable CPU mmap → 151fps GetImage |
 
 To regenerate a patch after editing kernel source in-tree:
 ```sh
@@ -130,13 +131,21 @@ git diff HEAD -- drivers/staging/media/sunxi/cedrus/<file>.c | grep -v "^diff --
 ## Current status (2026-05-12)
 
 **H264 decode: FULLY WORKING.** All frame types (I/P/B) correct. Verified via libva (ffmpeg)
-and GStreamer (v4l2slh264dec). ~22fps at 1440×1080.
+and GStreamer (v4l2slh264dec). ~192fps at 1440×1080 with `-hwaccel_output_format vaapi`
+(frames stay in HW). ~151fps with GetImage (vb2_dma_sg + 8-thread parallel copy).
 
-**H265 decode: FULLY WORKING.** Verified via libva (ffmpeg). ~22fps at 1440×1080.
-GStreamer: `vah265dec` crashes (driver incompatibility); no `v4l2slh265dec` in GST 1.20.3.
+**H265 decode: FULLY WORKING.** Verified via libva (ffmpeg). ~192fps at 1440×1080
+with `-hwaccel_output_format vaapi`. GStreamer: `vah265dec` crashes (driver incompatibility);
+no `v4l2slh265dec` in GST 1.20.3.
 
 **MPEG2 decode: FULLY WORKING.** Verified via libva (ffmpeg) and GStreamer (v4l2slmpeg2dec).
 ~21fps at 1440×1080. Uses 3-control stateless API (SEQUENCE + PICTURE + QUANTISATION).
+
+GetImage optimization (H264/H265, 22fps → 151fps):
+1. `src/tiled_yuv_aarch64.S`: tile-by-tile ASM iteration (cache-friendly tile reads)
+2. `src/tiled_yuv_mt.c`: 8-thread pool splitting tile rows across T527 A55 cores → 3×
+3. Kernel patch 0007: CAPTURE queue `vb2_dma_sg` → cacheable CPU mmap + auto cache sync → 7× total
+4. `src/context.c` + `src/image.c`: dma-buf EXPBUF + remap + `DMA_BUF_IOCTL_SYNC`
 
 Root cause of H264/H265 P/B garbage: T527 VE dual MBUS masters — VE_MBUS1 (master 3,
 MC reference reads) not bound to IOMMU. Fixed by kernel patches 0003 (VE_MBUS1 IOMMU
