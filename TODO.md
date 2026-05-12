@@ -1,9 +1,14 @@
 # libva-v4l2-request — TODO & Status
 
-## Status (2026-05-11)
+## Status (2026-05-12)
 
 **H264 HW decode: WORKING** — All frame types (I/P/B) decode correctly on T527 cedrus.
 Verified via libva (ffmpeg -hwaccel vaapi) and GStreamer (v4l2slh264dec) independently.
+
+**H265 HW decode: WORKING** — Implemented translation layer from old Bootlin hevc-ctrls to
+BSP kernel structs (include/hevc-ctrls-bsp.h + rewritten src/h265.c). Sends 4 controls:
+SPS, PPS, DECODE_PARAMS, SLICE_PARAMS. Verified 1440×1080 HEVC Main, I/P/B frames correct,
+60s transcode output visually perfect.
 
 Root cause of P/B garbage was dual MBUS IOMMU: VE_MBUS1 (master 3, MC reference reads)
 not bound to IOMMU. Fix: kernel patches 0006 (DTS master 2) + 0017 (sunxi_enable_device_iommu(3)).
@@ -40,9 +45,11 @@ Removed debug patches: 0007, 0010, 0012.
 - [ ] **Clean debug printks from main branch** — scan all `src/` files for leftover
       `fprintf`/debug log calls added during P/B investigation; remove before tagging
 
-- [ ] **Branch: H265 + MPEG2 evaluation** — create `codec/h265-mpeg2` branch;
-      wire up H265 and MPEG2 codec paths (already stubbed in cedrus variant 0003);
-      test with sample files; likely needs new translation structs in v4l2_translation.c
+- [x] **H265 decode working** — translation layer implemented, 1440×1080 verified
+
+- [ ] **Commit H265 changes** — commit include/hevc-ctrls-bsp.h + src/h265.c rewrite
+
+- [ ] **MPEG2 evaluation** — check cedrus mpeg2 path; likely needs similar struct audit
 
 - [ ] **Research HW encoding on OrangePi 4A** — T527 VE may support H264/H265 encode;
       check cedrus encode support upstream; check if BSP kernel has encode ioctls;
