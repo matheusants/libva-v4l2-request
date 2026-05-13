@@ -108,7 +108,7 @@ Live patches: `/home/orangepi/orangepi-build/userpatches/kernel/sun55iw3-current
 Applied alphabetically by orangepi-build. Generated via `git diff HEAD` on kernel tree,
 stripped of `diff --git` / `index` lines so `patch -p1` applies cleanly.
 
-Consolidated patches (7 files, replacing 15 individual patches):
+Consolidated patches (8 files, replacing 15 individual patches):
 
 | Patch | File | Purpose |
 |---|---|---|
@@ -117,8 +117,9 @@ Consolidated patches (7 files, replacing 15 individual patches):
 | 0003-t527-cedrus-hw | cedrus_hw.c | Skip SRAM claim + NV12/TILED fmt fix + TILED stride + IRQ completion + VE_MBUS1 IOMMU |
 | 0004-t527-cedrus-h264 | cedrus_h264.c | Skip pic_list pos 0 + re-apply dst_format + MIXED_RAM bufs |
 | 0005-t527-cedrus-mpeg2 | cedrus_mpeg2.c | Re-apply dst_format after engine_enable |
-| 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clock-names/iommus master 2/disable duplicate ve1 |
+| 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clock-names/iommus master 2/disable ve1/add ve_enc node |
 | 0007-t527-cedrus-capture-dma-sg | cedrus.h + cedrus_video.c + Kconfig | CAPTURE queue vb2_dma_sg → cacheable CPU mmap → 151fps GetImage |
+| 0010-t527-cedar-enc-compat | bsp/drivers/ve/cedar-ve/cedar_ve.c | sunxi-ve: add "sunxi-cedar-ve-enc" compat + poll mode when no IRQ |
 
 To regenerate a patch after editing kernel source in-tree:
 ```sh
