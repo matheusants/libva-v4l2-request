@@ -117,9 +117,9 @@ Consolidated patches (8 files, replacing 15 individual patches):
 | 0003-t527-cedrus-hw | cedrus_hw.c | Skip SRAM claim + NV12/TILED fmt fix + TILED stride + IRQ completion + VE_MBUS1 IOMMU |
 | 0004-t527-cedrus-h264 | cedrus_h264.c | Skip pic_list pos 0 + re-apply dst_format + MIXED_RAM bufs |
 | 0005-t527-cedrus-mpeg2 | cedrus_mpeg2.c | Re-apply dst_format after engine_enable |
-| 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clock-names/iommus master 2/disable ve1/add ve_enc node |
+| 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clock-names/iommus master 2/disable ve1 (cedrus decode only) |
 | 0007-t527-cedrus-capture-dma-sg | cedrus.h + cedrus_video.c + Kconfig | CAPTURE queue vb2_dma_sg → cacheable CPU mmap → 151fps GetImage |
-| 0010-t527-cedar-enc-compat | bsp/drivers/ve/cedar-ve/cedar_ve.c | sunxi-ve: add "sunxi-cedar-ve-enc" compat + poll mode when no IRQ |
+| 0010-t527-cedar-enc-compat | cedar_ve.c + sun55i-t527-orangepi-4a.dts | sunxi-ve: "sunxi-cedar-ve-enc" compat + poll mode (no IRQ) + ve_enc DT node |
 
 To regenerate a patch after editing kernel source in-tree:
 ```sh
@@ -128,6 +128,30 @@ git diff HEAD -- drivers/staging/media/sunxi/cedrus/<file>.c | grep -v "^diff --
 ```
 
 **`refs/` directories read-only.** Never modify files there directly.
+
+## H264 encoder smoke test (Path A)
+
+Standalone test program that directly programs VE AVC engine via `/dev/cedar_dev`:
+
+```sh
+# Build
+gcc -O2 -o enc_hw_test test/enc_hw_test.c
+
+# Run (requires sunxi_ve module loaded + /dev/cedar_dev)
+sudo modprobe sunxi_ve
+sudo ./enc_hw_test 320 240 10 > out.264
+ffplay out.264
+```
+
+Requires kernel built with patches 0006 + 0010 (ve_enc DT node + sunxi-cedar-ve-enc compat).
+
+Key design:
+- Alloc DMA bufs via `/dev/dma_heap/system` (`DMA_HEAP_IOCTL_ALLOC` → dma-buf fd)
+- Get IOMMU addrs via `IOCTL_MAP_DMA_BUF` on cedar_fd
+- mmap VE regs via `mmap(NULL, 0x1000, ..., cedar_fd, 0)` (MACC_REGS_BASE=0x01C0E000)
+- Write SPS/PPS/slice headers via HW bit writer (`VE_AVC_BASIC_BITS` + trigger)
+- Poll completion via `VE_AVC_STATUS` (0xb1c) — no IRQ needed
+- No dependency on libvencoder.so / libVE.so / libMemAdapter.so
 
 ## Current status (2026-05-12)
 
