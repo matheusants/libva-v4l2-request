@@ -131,27 +131,18 @@ git diff HEAD -- drivers/staging/media/sunxi/cedrus/<file>.c | grep -v "^diff --
 
 ## H264 encoder smoke test (Path A)
 
-Standalone test program that directly programs VE AVC engine via `/dev/cedar_dev`:
+Lives in `../path-a-cedar-bsp-enc/`. Standalone test that directly programs VE AVC engine
+via `/dev/cedar_dev` — no dependency on this VAAPI driver.
 
 ```sh
-# Build
-gcc -O2 -o enc_hw_test test/enc_hw_test.c
-
-# Run (requires sunxi_ve module loaded + /dev/cedar_dev)
+cd /srv/samba/NAS/BACKUP_CACHE/HW_Vid_Process/path-a-cedar-bsp-enc
+gcc -O2 -o enc_hw_test enc_hw_test.c
 sudo modprobe sunxi_ve
 sudo ./enc_hw_test 320 240 10 > out.264
 ffplay out.264
 ```
 
-Requires kernel built with patches 0006 + 0010 (ve_enc DT node + sunxi-cedar-ve-enc compat).
-
-Key design:
-- Alloc DMA bufs via `/dev/dma_heap/system` (`DMA_HEAP_IOCTL_ALLOC` → dma-buf fd)
-- Get IOMMU addrs via `IOCTL_MAP_DMA_BUF` on cedar_fd
-- mmap VE regs via `mmap(NULL, 0x1000, ..., cedar_fd, 0)` (MACC_REGS_BASE=0x01C0E000)
-- Write SPS/PPS/slice headers via HW bit writer (`VE_AVC_BASIC_BITS` + trigger)
-- Poll completion via `VE_AVC_STATUS` (0xb1c) — no IRQ needed
-- No dependency on libvencoder.so / libVE.so / libMemAdapter.so
+Requires kernel patches 0006 + 0010 (ve_enc DT node + sunxi-cedar-ve-enc compat).
 
 ## Current status (2026-05-12)
 
