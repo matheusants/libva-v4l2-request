@@ -5,7 +5,8 @@
 **H264 HW decode: WORKING** — All frame types (I/P/B) correct on T527 cedrus.
 Verified via libva (ffmpeg -hwaccel vaapi) and GStreamer (v4l2slh264dec).
 ~192fps at 1440×1080 with -hwaccel_output_format vaapi (frames stay in HW).
-~22fps without it — bottleneck is vaGetImage tiled→linear CPU copy in image.c.
+~151fps without it (GetImage enabled) — dma-sg CAPTURE queue + 8-thread parallel copy.
+~22fps original baseline before optimization.
 
 **H265 HW decode: WORKING** — 4-control stateless API (SPS + PPS + DECODE_PARAMS + SLICE_PARAMS).
 Verified via libva (ffmpeg). ~192fps at 1440×1080 (hwaccel_output_format vaapi).
@@ -22,7 +23,7 @@ Root causes resolved:
 
 ## Active kernel patches
 
-6 consolidated patches in /home/orangepi/orangepi-build/userpatches/kernel/sun55iw3-current/:
+7 patches in /home/orangepi/orangepi-build/userpatches/kernel/sun55iw3-current/:
 
 | Patch | File | Purpose |
 |---|---|---|
@@ -32,6 +33,7 @@ Root causes resolved:
 | 0004-t527-cedrus-h264 | cedrus_h264.c | pos0 skip + dst_format reapply + MIXED_RAM |
 | 0005-t527-cedrus-mpeg2 | cedrus_mpeg2.c | dst_format reapply after engine_enable |
 | 0006-t527-dts | sun55i-t527-orangepi-4a.dts | reg/clocks/iommus master 2/disable ve1 |
+| 0007-t527-cedrus-capture-dma-sg | cedrus.h + cedrus_video.c + Kconfig | CAPTURE queue vb2_dma_sg → cacheable CPU mmap → 151fps GetImage |
 
 Disabled (debug): 0008-watchdog-timeout, 0009-dump-h264-params
 Backed up (superseded individual patches): backup_individual/
@@ -40,10 +42,10 @@ Backed up (superseded individual patches): backup_individual/
 
 ## TODO
 
-- [ ] **Optimize tiled_to_planar (src/image.c + tiled_yuv_aarch64.S)** — vaGetImage
-      tiled→linear CPU copy costs ~8.7× throughput (192fps → 22fps at 1440×1080).
-      Profile cache behavior; 32×32 tile traversal likely cache-unfriendly for large stride.
-      NEON prefetch or reorder copy loop may recover significant fps.
+- [x] **Optimize tiled_to_planar** — DONE. 22fps → 151fps via:
+      1. Tile-by-tile ASM iteration (tiled_yuv_aarch64.S)
+      2. 8-thread parallel copy pool (tiled_yuv_mt.c)
+      3. Kernel patch 0007: VB2 dma-sg CAPTURE queue → cacheable mmap + auto cache sync
 
 - [ ] **Frame quality cross-reference** — compare decoded frames vs another HW platform
       to verify pixel-accurate output (noted frames look correct but sizes seem large)
