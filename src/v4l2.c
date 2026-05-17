@@ -405,6 +405,40 @@ int v4l2_dequeue_buffer(int video_fd, int request_fd, unsigned int type,
 	return buffer.index;
 }
 
+/*
+ * Dequeue a buffer and report its payload size. Used by the H264 encoder to
+ * read the coded bitstream length out of a CAPTURE buffer.
+ */
+int v4l2_dequeue_buffer_size(int video_fd, unsigned int type,
+			     unsigned int index, unsigned int buffers_count,
+			     unsigned int *bytesused)
+{
+	struct v4l2_plane planes[buffers_count];
+	struct v4l2_buffer buffer;
+	int rc;
+
+	memset(planes, 0, sizeof(planes));
+	memset(&buffer, 0, sizeof(buffer));
+
+	buffer.type = type;
+	buffer.memory = V4L2_MEMORY_MMAP;
+	buffer.length = buffers_count;
+	buffer.m.planes = planes;
+	buffer.index = index;
+
+	rc = ioctl(video_fd, VIDIOC_DQBUF, &buffer);
+	if (rc < 0) {
+		request_log("Unable to dequeue buffer: %s\n", strerror(errno));
+		return -1;
+	}
+
+	if (bytesused != NULL)
+		*bytesused = v4l2_type_is_mplane(type) ?
+			planes[0].bytesused : buffer.bytesused;
+
+	return buffer.index;
+}
+
 int v4l2_export_buffer(int video_fd, unsigned int type, unsigned int index,
 		       unsigned int flags, int *export_fds,
 		       unsigned int export_fds_count)

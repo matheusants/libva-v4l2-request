@@ -56,12 +56,26 @@ VAStatus RequestCreateConfig(VADriverContextP context, VAProfile profile,
 	switch (profile) {
 	case VAProfileMPEG2Simple:
 	case VAProfileMPEG2Main:
+	case VAProfileHEVCMain:
+		if (entrypoint != VAEntrypointVLD)
+			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+		break;
+
 	case VAProfileH264Main:
-	case VAProfileH264High:
 	case VAProfileH264ConstrainedBaseline:
+		/*
+		 * H264: VLD decode (cedrus) or EncSlice encode (sunxi-venc).
+		 * Encode is limited to Baseline/Main — the VE bit-writer emits
+		 * baseline-syntax SPS (no High-profile scaling-matrix block).
+		 */
+		if (entrypoint != VAEntrypointVLD &&
+		    entrypoint != VAEntrypointEncSlice)
+			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+		break;
+
+	case VAProfileH264High:
 	case VAProfileH264MultiviewHigh:
 	case VAProfileH264StereoHigh:
-		case VAProfileHEVCMain:
 		if (entrypoint != VAEntrypointVLD)
 			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
 		break;
@@ -156,14 +170,20 @@ VAStatus RequestQueryConfigEntrypoints(VADriverContextP context,
 	switch (profile) {
 	case VAProfileMPEG2Simple:
 	case VAProfileMPEG2Main:
-	case VAProfileH264Main:
 	case VAProfileH264High:
-	case VAProfileH264ConstrainedBaseline:
 	case VAProfileH264MultiviewHigh:
 	case VAProfileH264StereoHigh:
 	case VAProfileHEVCMain:
 		entrypoints[0] = VAEntrypointVLD;
 		*entrypoints_count = 1;
+		break;
+
+	case VAProfileH264Main:
+	case VAProfileH264ConstrainedBaseline:
+		/* Decode (cedrus VLD) + encode (sunxi-venc EncSlice). */
+		entrypoints[0] = VAEntrypointVLD;
+		entrypoints[1] = VAEntrypointEncSlice;
+		*entrypoints_count = 2;
 		break;
 
 	default:
@@ -216,6 +236,17 @@ VAStatus RequestGetConfigAttributes(VADriverContextP context, VAProfile profile,
 		switch (attributes[i].type) {
 		case VAConfigAttribRTFormat:
 			attributes[i].value = VA_RT_FORMAT_YUV420;
+			break;
+		/* H264 encode (VAEntrypointEncSlice) attributes. */
+		case VAConfigAttribRateControl:
+			attributes[i].value = VA_RC_CQP | VA_RC_CBR | VA_RC_VBR;
+			break;
+		case VAConfigAttribEncPackedHeaders:
+			/* The VE generates SPS/PPS/slice headers itself. */
+			attributes[i].value = VA_ENC_PACKED_HEADER_NONE;
+			break;
+		case VAConfigAttribEncMaxRefFrames:
+			attributes[i].value = 1;	/* one reference (P-frames) */
 			break;
 		default:
 			attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;

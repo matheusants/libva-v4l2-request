@@ -90,6 +90,8 @@ struct object_surface {
 	int request_fd;
 	/* Sugestões Claude Patch 1.0 */
 	bool capture_queued;  /* buffer CAPTURE está enfileirado no kernel */
+	/* M4: surface is the raw NV12 input of an encode context. */
+	bool encode_input;
 	//bool is_queued_in_v4l2; // Sugestão Google IA Patch 1.08 - INDICAR SE O BUFFER DE SAÍDA FOI ENFILEIRADO NO V4L2 */
 };
 

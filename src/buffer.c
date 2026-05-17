@@ -61,6 +61,15 @@ VAStatus RequestCreateBuffer(VADriverContextP context, VAContextID context_id,
 	case VASliceParameterBufferType:
 	case VASliceDataBufferType:
 	case VAImageBufferType:
+	/* H264 encode (VAEntrypointEncSlice) buffer types. */
+	case VAEncSequenceParameterBufferType:
+	case VAEncPictureParameterBufferType:
+	case VAEncSliceParameterBufferType:
+	case VAEncMiscParameterBufferType:
+	case VAEncCodedBufferType:
+	/* ffmpeg also submits packed-header buffers; accept and ignore. */
+	case VAEncPackedHeaderParameterBufferType:
+	case VAEncPackedHeaderDataBufferType:
 		break;
 
 	default:
@@ -92,6 +101,17 @@ VAStatus RequestCreateBuffer(VADriverContextP context, VAContextID context_id,
 
 	buffer_object->derived_surface_id = VA_INVALID_ID;
 	buffer_object->info.handle = (uintptr_t) -1;
+
+	/*
+	 * A coded buffer is the encoder's output: its payload starts empty and
+	 * is filled after the encode. vaMapBuffer returns the segment list.
+	 */
+	if (type == VAEncCodedBufferType) {
+		memset(&buffer_object->coded_segment, 0,
+		       sizeof(buffer_object->coded_segment));
+		buffer_object->coded_segment.buf = buffer_data;
+		buffer_object->coded_segment.size = 0;
+	}
 
 	*buffer_id = id;
 
@@ -134,6 +154,12 @@ VAStatus RequestMapBuffer(VADriverContextP context, VABufferID buffer_id,
 	buffer_object = BUFFER(driver_data, buffer_id);
 	if (buffer_object == NULL || buffer_object->data == NULL)
 		return VA_STATUS_ERROR_INVALID_BUFFER;
+
+	/* A coded buffer maps to its VACodedBufferSegment list. */
+	if (buffer_object->type == VAEncCodedBufferType) {
+		*data_map = &buffer_object->coded_segment;
+		return VA_STATUS_SUCCESS;
+	}
 
 	/* Our buffers are always mapped. */
 	*data_map = buffer_object->data;

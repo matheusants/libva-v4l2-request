@@ -28,6 +28,7 @@
 #define _CONTEXT_H_
 
 #include <va/va_backend.h>
+#include <va/va_enc_h264.h>
 
 #include "object_heap.h"
 #include "h264.h"
@@ -35,6 +36,9 @@
 #define CONTEXT(data, id)                                                      \
 	((struct object_context *)object_heap_lookup(&(data)->context_heap, id))
 #define CONTEXT_ID_OFFSET		0x02000000
+
+struct request_data;
+struct object_surface;
 
 struct object_context {
 	struct object_base base;
@@ -48,8 +52,37 @@ struct object_context {
 	int picture_height;
 	int flags;
 
-	/* H264 only */
+	/* H264 decode only */
 	struct h264_dpb dpb;
+
+	/*
+	 * H264 encode (VAEntrypointEncSlice). The encoder is the standalone
+	 * sunxi-venc stateful V4L2 M2M device (/dev/videoN), separate from the
+	 * cedrus decoder — it has its own fd and needs no Request API.
+	 */
+	bool is_encoder;
+	int encoder_fd;
+	bool encoder_streaming;
+	unsigned int enc_frame_num;
+
+	/*
+	 * One transient V4L2 buffer pair, reused every frame: the encode runs
+	 * synchronously (blocking DQBUF) so a single in-flight frame suffices.
+	 * Input surfaces are plain heap NV12 (filled by vaPutImage) and copied
+	 * into enc_out_data per frame.
+	 */
+	unsigned int enc_out_index;
+	void *enc_out_data;
+	unsigned int enc_out_size;
+	unsigned int enc_cap_index;
+	void *enc_cap_data;
+	unsigned int enc_cap_size;
+
+	/* Encode parameters latched via RenderPicture for the current frame. */
+	VAEncSequenceParameterBufferH264 enc_seq;
+	bool enc_seq_valid;
+	VAEncPictureParameterBufferH264 enc_pic;
+	bool enc_pic_valid;
 };
 
 VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,

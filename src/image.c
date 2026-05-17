@@ -32,6 +32,7 @@
 #include "video.h"
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <linux/dma-buf.h>
@@ -69,27 +70,35 @@ VAStatus RequestCreateImage(VADriverContextP context, VAImageFormat *format,
 	 * FIXME: This should be replaced by per-pixelformat hadling to
 	 * determine the logical plane offsets and sizes;
 	 */
+	format_width = 0;
+	format_height = 0;
 	rc = v4l2_get_format(driver_data->video_fd, capture_type,
 			     &format_width, &format_height,
 			     destination_bytesperlines, destination_sizes,
 			     &planes_count);
-	if (rc < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
 
 	destination_planes_count = video_format->planes_count;
-	size = 0;
 
-	/* The size returned by V4L2 covers buffers, not logical planes. */
-	for (i = 0; i < planes_count; i++)
-		size += destination_sizes[i];
+	/*
+	 * v4l2_get_format targets the decoder CAPTURE queue. For an encode-side
+	 * image — or any time the query yields a layout too small for the
+	 * requested picture — fall back to a plain 16-aligned NV12 layout
+	 * derived from width/height.
+	 */
+	if (rc < 0 || destination_bytesperlines[0] < (unsigned int)width ||
+	    format_height < (unsigned int)height) {
+		destination_bytesperlines[0] = ((unsigned int)width + 15) & ~15U;
+		format_height = ((unsigned int)height + 15) & ~15U;
+	}
 
-	/* Here we calculate the sizes assuming NV12. */
-
+	/* NV12: luma plane then half-size interleaved chroma plane. */
 	destination_sizes[0] = destination_bytesperlines[0] * format_height;
+	size = destination_sizes[0];
 
 	for (i = 1; i < destination_planes_count; i++) {
 		destination_bytesperlines[i] = destination_bytesperlines[0];
 		destination_sizes[i] = destination_sizes[0] / 2;
+		size += destination_sizes[i];
 	}
 
 	id = object_heap_allocate(&driver_data->image_heap);
@@ -201,6 +210,14 @@ VAStatus RequestDeriveImage(VADriverContextP context, VASurfaceID surface_id,
 	if (surface_object == NULL)
 		return VA_STATUS_ERROR_INVALID_SURFACE;
 
+	/*
+	 * Encode input surfaces are not derivable: the app must upload via
+	 * vaPutImage so the raw frame lands in the V4L2 OUTPUT buffer. Failing
+	 * here makes libva/ffmpeg fall back to the CreateImage + PutImage path.
+	 */
+	if (surface_object->encode_input)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
 	/* Surface não está pronta para leitura — buffers ainda não mapeados */
         if (surface_object->destination_data[0] == NULL)
                 return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -269,11 +286,52 @@ VAStatus RequestGetImage(VADriverContextP context, VASurfaceID surface_id,
 	return copy_surface_to_image (driver_data, surface_object, image);
 }
 
+/*
+ * Upload a raw image into a surface. Used to feed the H264 encoder: the NV12
+ * frame is stored in the surface's heap buffer (source_data), which is later
+ * copied into the encoder's V4L2 OUTPUT buffer by RequestEndPicture. The
+ * surface is given a heap buffer on first upload — it needs no V4L2 device or
+ * encode context, so this works even before vaCreateContext.
+ */
 VAStatus RequestPutImage(VADriverContextP context, VASurfaceID surface_id,
 			 VAImageID image, int src_x, int src_y,
 			 unsigned int src_width, unsigned int src_height,
 			 int dst_x, int dst_y, unsigned int dst_width,
 			 unsigned int dst_height)
 {
-	return VA_STATUS_ERROR_UNIMPLEMENTED;
+	struct request_data *driver_data = context->pDriverData;
+	struct object_surface *surface_object;
+	struct object_image *image_object;
+	struct object_buffer *buffer_object;
+	unsigned int size;
+
+	surface_object = SURFACE(driver_data, surface_id);
+	if (surface_object == NULL)
+		return VA_STATUS_ERROR_INVALID_SURFACE;
+
+	image_object = IMAGE(driver_data, image);
+	if (image_object == NULL)
+		return VA_STATUS_ERROR_INVALID_IMAGE;
+
+	buffer_object = BUFFER(driver_data, image_object->image.buf);
+	if (buffer_object == NULL || buffer_object->data == NULL)
+		return VA_STATUS_ERROR_INVALID_BUFFER;
+
+	size = image_object->image.data_size;
+
+	/* Give the encode input surface a heap buffer on first upload. */
+	if (surface_object->source_data == NULL) {
+		surface_object->source_data = malloc(size);
+		if (surface_object->source_data == NULL)
+			return VA_STATUS_ERROR_ALLOCATION_FAILED;
+		surface_object->source_size = size;
+		surface_object->encode_input = true;
+	}
+
+	if (size > surface_object->source_size)
+		size = surface_object->source_size;
+
+	memcpy(surface_object->source_data, buffer_object->data, size);
+
+	return VA_STATUS_SUCCESS;
 }

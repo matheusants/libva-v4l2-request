@@ -32,6 +32,7 @@
 #include "surface.h"
 
 #include "h264.h"
+#include "h264_enc.h"
 #include "h265.h"
 #include "mpeg2.h"
 
@@ -209,6 +210,113 @@ static VAStatus codec_set_controls(struct request_data *driver_data,
 	return VA_STATUS_SUCCESS;
 }
 
+/*
+ * M4 — encode one frame on the sunxi-venc M2M encoder. Program the V4L2
+ * controls from the latched VAAPI parameters, queue the raw NV12 input and a
+ * coded-output buffer, wait for the encode, and copy the coded H264 into the
+ * VA coded buffer. The encoder fd is blocking, so DQBUF waits for completion.
+ */
+static VAStatus request_encode_picture(struct request_data *driver_data,
+				       struct object_context *context_object)
+{
+	struct object_config *config_object;
+	struct object_surface *surface_object;
+	struct object_buffer *coded_object;
+	unsigned int output_type = v4l2_type_video_output(false);
+	unsigned int capture_type = v4l2_type_video_capture(false);
+	unsigned int nv12_size, coded_bytes = 0;
+	struct timeval timestamp;
+	int fd = context_object->encoder_fd;
+	int rc;
+
+	config_object = CONFIG(driver_data, context_object->config_id);
+	if (config_object == NULL)
+		return VA_STATUS_ERROR_INVALID_CONFIG;
+
+	surface_object = SURFACE(driver_data, context_object->render_surface_id);
+	if (surface_object == NULL)
+		return VA_STATUS_ERROR_INVALID_SURFACE;
+
+	if (!context_object->enc_pic_valid)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	if (surface_object->source_data == NULL) {
+		request_log("encode: surface 0x%x was never uploaded\n",
+			    context_object->render_surface_id);
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+	}
+
+	/* Program controls; on the first frame also STREAMON both queues. */
+	h264_enc_set_controls(context_object, config_object->profile,
+			      !context_object->encoder_streaming);
+
+	if (!context_object->encoder_streaming) {
+		rc = v4l2_set_stream(fd, output_type, true);
+		if (rc < 0)
+			return VA_STATUS_ERROR_OPERATION_FAILED;
+		rc = v4l2_set_stream(fd, capture_type, true);
+		if (rc < 0)
+			return VA_STATUS_ERROR_OPERATION_FAILED;
+		context_object->encoder_streaming = true;
+	}
+
+	nv12_size = context_object->picture_width *
+		    context_object->picture_height * 3 / 2;
+	if (nv12_size > context_object->enc_out_size)
+		nv12_size = context_object->enc_out_size;
+	if (nv12_size > surface_object->source_size)
+		nv12_size = surface_object->source_size;
+
+	/* Copy the uploaded NV12 frame into the encoder's OUTPUT buffer. */
+	memcpy(context_object->enc_out_data, surface_object->source_data,
+	       nv12_size);
+
+	gettimeofday(&timestamp, NULL);
+
+	/* Queue the coded-output buffer, then the raw NV12 input. */
+	rc = v4l2_queue_buffer(fd, -1, capture_type, &timestamp,
+			       context_object->enc_cap_index, 0, 1);
+	if (rc < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	rc = v4l2_queue_buffer(fd, -1, output_type, &timestamp,
+			       context_object->enc_out_index, nv12_size, 1);
+	if (rc < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	/* Blocking DQBUF — waits for the encode to finish. */
+	if (v4l2_dequeue_buffer(fd, -1, output_type,
+				context_object->enc_out_index, 1) < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	if (v4l2_dequeue_buffer_size(fd, capture_type,
+				     context_object->enc_cap_index, 1,
+				     &coded_bytes) < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	/* Copy the coded H264 into the VA coded buffer. */
+	coded_object = BUFFER(driver_data, context_object->enc_pic.coded_buf);
+	if (coded_object == NULL ||
+	    coded_object->type != VAEncCodedBufferType)
+		return VA_STATUS_ERROR_INVALID_BUFFER;
+
+	if (coded_bytes > coded_object->size)
+		coded_bytes = coded_object->size;
+	memcpy(coded_object->data, context_object->enc_cap_data, coded_bytes);
+
+	coded_object->coded_segment.buf = coded_object->data;
+	coded_object->coded_segment.size = coded_bytes;
+	coded_object->coded_segment.bit_offset = 0;
+	coded_object->coded_segment.status = 0;
+	coded_object->coded_segment.next = NULL;
+
+	context_object->enc_frame_num++;
+	surface_object->status = VASurfaceReady;
+	context_object->render_surface_id = VA_INVALID_ID;
+
+	return VA_STATUS_SUCCESS;
+}
+
 VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
                              VASurfaceID surface_id)
 {
@@ -223,6 +331,13 @@ VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
         surface_object = SURFACE(driver_data, surface_id);
         if (surface_object == NULL)
                 return VA_STATUS_ERROR_INVALID_SURFACE;
+
+        /* Encode: no Request API, no DPB sync — just latch the surface. */
+        if (context_object->is_encoder) {
+                surface_object->status = VASurfaceRendering;
+                context_object->render_surface_id = surface_id;
+                return VA_STATUS_SUCCESS;
+        }
 
         if (surface_object->status == VASurfaceRendering)
                 RequestSyncSurface(context, surface_id);
@@ -281,6 +396,46 @@ VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 	if (config_object == NULL)
 		return VA_STATUS_ERROR_INVALID_CONFIG;
 
+	/* Encode: latch the VAAPI encode parameter buffers for this frame. */
+	if (context_object->is_encoder) {
+		for (i = 0; i < buffers_count; i++) {
+			buffer_object = BUFFER(driver_data, buffers_ids[i]);
+			if (buffer_object == NULL)
+				return VA_STATUS_ERROR_INVALID_BUFFER;
+
+			switch (buffer_object->type) {
+			case VAEncSequenceParameterBufferType:
+				memcpy(&context_object->enc_seq,
+				       buffer_object->data,
+				       buffer_object->size <
+					       sizeof(context_object->enc_seq) ?
+				       buffer_object->size :
+				       sizeof(context_object->enc_seq));
+				context_object->enc_seq_valid = true;
+				break;
+
+			case VAEncPictureParameterBufferType:
+				memcpy(&context_object->enc_pic,
+				       buffer_object->data,
+				       buffer_object->size <
+					       sizeof(context_object->enc_pic) ?
+				       buffer_object->size :
+				       sizeof(context_object->enc_pic));
+				context_object->enc_pic_valid = true;
+				break;
+
+			case VAEncSliceParameterBufferType:
+				/* The VE emits slice data itself. */
+				break;
+
+			default:
+				break;
+			}
+		}
+
+		return VA_STATUS_SUCCESS;
+	}
+
 	surface_object =
 		SURFACE(driver_data, context_object->render_surface_id);
 	if (surface_object == NULL)
@@ -322,6 +477,10 @@ VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id)
         context_object = CONTEXT(driver_data, context_id);
         if (context_object == NULL)
                 return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+        /* Encode contexts run the sunxi-venc M2M path. */
+        if (context_object->is_encoder)
+                return request_encode_picture(driver_data, context_object);
 
         config_object = CONFIG(driver_data, context_object->config_id);
         if (config_object == NULL)

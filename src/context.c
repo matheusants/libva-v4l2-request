@@ -29,9 +29,11 @@
 #include "request.h"
 #include "surface.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <assert.h>
 
@@ -49,6 +51,158 @@
 #include "v4l2.h"
 
 #include "autoconfig.h"
+
+/*
+ * M4 — H264 encode (VAEntrypointEncSlice).
+ *
+ * The encoder is the standalone sunxi-venc stateful V4L2 M2M device, separate
+ * from the cedrus decoder. Locate it by VIDIOC_QUERYCAP driver name (override
+ * with LIBVA_V4L2_REQUEST_ENCODER_PATH).
+ */
+static int encoder_device_open(void)
+{
+	const char *env = getenv("LIBVA_V4L2_REQUEST_ENCODER_PATH");
+	struct v4l2_capability cap;
+	char path[32];
+	int fd, i;
+
+	if (env != NULL) {
+		fd = open(env, O_RDWR);
+		if (fd >= 0)
+			return fd;
+	}
+
+	for (i = 0; i < 16; i++) {
+		snprintf(path, sizeof(path), "/dev/video%d", i);
+		fd = open(path, O_RDWR);
+		if (fd < 0)
+			continue;
+
+		if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+		    strcmp((const char *)cap.driver, "sunxi-venc") == 0)
+			return fd;
+
+		close(fd);
+	}
+
+	return -1;
+}
+
+/*
+ * Set up an encode context: open the sunxi-venc M2M device, configure
+ * NV12 OUTPUT / H264 CAPTURE formats, allocate and mmap the per-surface
+ * input and coded buffers. STREAMON is deferred to the first RequestEndPicture
+ * so the V4L2 encoder controls can be programmed from the VAAPI parameters.
+ */
+static VAStatus request_create_encode_context(struct request_data *driver_data,
+					      VAConfigID config_id,
+					      int picture_width,
+					      int picture_height, int flags,
+					      VASurfaceID *surfaces_ids,
+					      int surfaces_count,
+					      VAContextID *context_id)
+{
+	struct object_context *context_object = NULL;
+	unsigned int output_type = v4l2_type_video_output(false);
+	unsigned int capture_type = v4l2_type_video_capture(false);
+	unsigned int output_base, capture_base;
+	unsigned int length, offset;
+	VAContextID id;
+	void *map;
+	int fd, rc;
+
+	(void)surfaces_ids;
+	(void)surfaces_count;
+
+	fd = encoder_device_open();
+	if (fd < 0) {
+		request_log("encode: sunxi-venc device not found\n");
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+	}
+
+	rc = v4l2_set_format(fd, output_type, V4L2_PIX_FMT_NV12,
+			     picture_width, picture_height);
+	if (rc < 0) {
+		request_log("encode: S_FMT OUTPUT NV12 failed\n");
+		goto error_fd;
+	}
+
+	rc = v4l2_set_format(fd, capture_type, V4L2_PIX_FMT_H264,
+			     picture_width, picture_height);
+	if (rc < 0) {
+		request_log("encode: S_FMT CAPTURE H264 failed\n");
+		goto error_fd;
+	}
+
+	/* One transient buffer per queue — the encode is synchronous. */
+	rc = v4l2_create_buffers(fd, output_type, 1, &output_base);
+	if (rc < 0) {
+		request_log("encode: CREATE_BUFS OUTPUT failed\n");
+		goto error_fd;
+	}
+
+	rc = v4l2_create_buffers(fd, capture_type, 1, &capture_base);
+	if (rc < 0) {
+		request_log("encode: CREATE_BUFS CAPTURE failed\n");
+		goto error_fd;
+	}
+
+	id = object_heap_allocate(&driver_data->context_heap);
+	context_object = CONTEXT(driver_data, id);
+	if (context_object == NULL)
+		goto error_fd;
+	/* Zero everything after object_base — the base holds heap bookkeeping
+	 * (id, next_free) that object_heap_allocate already set up. */
+	memset(&context_object->base + 1, 0,
+	       sizeof(*context_object) - sizeof(context_object->base));
+
+	/* mmap the OUTPUT (raw NV12 in) and CAPTURE (coded H264 out) buffers. */
+	rc = v4l2_query_buffer(fd, output_type, output_base, &length, &offset, 1);
+	if (rc < 0)
+		goto error_ctx;
+	map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+	if (map == MAP_FAILED)
+		goto error_ctx;
+	context_object->enc_out_index = output_base;
+	context_object->enc_out_data = map;
+	context_object->enc_out_size = length;
+
+	rc = v4l2_query_buffer(fd, capture_type, capture_base, &length, &offset,
+			       1);
+	if (rc < 0)
+		goto error_ctx;
+	map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+	if (map == MAP_FAILED)
+		goto error_ctx;
+	context_object->enc_cap_index = capture_base;
+	context_object->enc_cap_data = map;
+	context_object->enc_cap_size = length;
+
+	context_object->config_id = config_id;
+	context_object->render_surface_id = VA_INVALID_ID;
+	context_object->surfaces_ids = NULL;
+	context_object->surfaces_count = 0;
+	context_object->picture_width = picture_width;
+	context_object->picture_height = picture_height;
+	context_object->flags = flags;
+	context_object->is_encoder = true;
+	context_object->encoder_fd = fd;
+	context_object->encoder_streaming = false;
+
+	request_log("encode: context %u ready, %dx%d, OUTPUT=%u CAPTURE=%u\n",
+		    id, picture_width, picture_height, context_object->enc_out_size,
+		    context_object->enc_cap_size);
+
+	*context_id = id;
+	return VA_STATUS_SUCCESS;
+
+error_ctx:
+	object_heap_free(&driver_data->context_heap,
+			 (struct object_base *)context_object);
+error_fd:
+	close(fd);
+	return VA_STATUS_ERROR_OPERATION_FAILED;
+}
 
 VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 			      int picture_width, int picture_height, int flags,
@@ -76,6 +230,16 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 	unsigned int index;
 	unsigned int i, j;
 	int rc;
+
+	/* H264 encode contexts use the separate sunxi-venc M2M encoder. */
+	config_object = CONFIG(driver_data, config_id);
+	if (config_object != NULL &&
+	    config_object->entrypoint == VAEntrypointEncSlice)
+		return request_create_encode_context(driver_data, config_id,
+						     picture_width,
+						     picture_height, flags,
+						     surfaces_ids,
+						     surfaces_count, context_id);
 
 	video_format = driver_data->video_format;
 	if (video_format == NULL)
@@ -390,16 +554,32 @@ VAStatus RequestDestroyContext(VADriverContextP context, VAContextID context_id)
 	VAStatus status;
 	int rc;
 
+	context_object = CONTEXT(driver_data, context_id);
+	if (context_object == NULL)
+		return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+	/* Encode context: tear down the sunxi-venc encoder. */
+	if (context_object->is_encoder) {
+		if (context_object->encoder_streaming) {
+			v4l2_set_stream(context_object->encoder_fd,
+					v4l2_type_video_output(false), false);
+			v4l2_set_stream(context_object->encoder_fd,
+					v4l2_type_video_capture(false), false);
+		}
+		if (context_object->encoder_fd >= 0)
+			close(context_object->encoder_fd);
+		free(context_object->surfaces_ids);
+		object_heap_free(&driver_data->context_heap,
+				 (struct object_base *)context_object);
+		return VA_STATUS_SUCCESS;
+	}
+
 	video_format = driver_data->video_format;
 	if (video_format == NULL)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
 	output_type = v4l2_type_video_output(video_format->v4l2_mplane);
 	capture_type = v4l2_type_video_capture(video_format->v4l2_mplane);
-
-	context_object = CONTEXT(driver_data, context_id);
-	if (context_object == NULL)
-		return VA_STATUS_ERROR_INVALID_CONTEXT;
 
 	rc = v4l2_set_stream(driver_data->video_fd, output_type, false);
 	if (rc < 0)

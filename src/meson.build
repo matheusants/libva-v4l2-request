@@ -48,6 +48,7 @@ sources = [
 	'v4l2_translation.c',
 	'mpeg2.c',
 	'h264.c',
+	'h264_enc.c',
 	'h265.c'
 ]
 

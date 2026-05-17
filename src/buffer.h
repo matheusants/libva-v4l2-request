@@ -48,6 +48,13 @@ struct object_buffer {
 
 	VASurfaceID derived_surface_id;
 	VABufferInfo info;
+
+	/*
+	 * VAEncCodedBufferType: vaMapBuffer must return a VACodedBufferSegment
+	 * list, not the raw bitstream. coded_segment.buf points at ->data and
+	 * coded_segment.size is filled by RequestEndPicture after the encode.
+	 */
+	VACodedBufferSegment coded_segment;
 };
 
 VAStatus RequestCreateBuffer(VADriverContextP context, VAContextID context_id,
