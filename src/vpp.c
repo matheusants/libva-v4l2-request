@@ -233,8 +233,8 @@ VAStatus vpp_process_picture(struct request_data *driver_data,
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
 	/*
-	 * The decoder CAPTURE buffer is linear NV12 (kernel patch 0007). A
-	 * tiled buffer is detiled into a scratch linear copy first.
+	 * The decoder CAPTURE buffer is linear NV12 (kernel patch 0007) — scale
+	 * straight from it. A tiled buffer is detiled into a scratch copy first.
 	 */
 	if (video_format_is_linear(driver_data->video_format)) {
 		src_y = in->destination_data[0];

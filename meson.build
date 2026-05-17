@@ -22,6 +22,9 @@
 
 project('libva-v4l2-request', 'c',
 	version: '1.0.0',
+	# -O2 by default: the driver carries hot CPU paths (VPP scaler,
+	# tiled->linear GetImage) — an unoptimised build is ~4-5x slower.
+	default_options: ['optimization=2'],
 	meson_version: '>= 0.43.0')
 
 cc = meson.get_compiler('c')
