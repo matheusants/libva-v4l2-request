@@ -88,6 +88,16 @@ struct object_context {
 	 * target — using it overshoots, so the RC misc buffer wins. */
 	unsigned int enc_rc_bitrate;
 	bool enc_rc_valid;
+
+	/*
+	 * Video post-processing (VAEntrypointVideoProc). Used by Jellyfin's
+	 * scale_vaapi filter between the cedrus decoder and the sunxi-venc
+	 * encoder. Software NV12 scale/convert — no V4L2 device. The input
+	 * surface for the current frame is latched by RenderPicture from the
+	 * VAProcPipelineParameterBuffer; the output is render_surface_id.
+	 */
+	bool is_vpp;
+	VASurfaceID vpp_input_surface_id;
 };
 
 VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,

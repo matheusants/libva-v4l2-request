@@ -241,6 +241,30 @@ VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,
 						     surfaces_ids,
 						     surfaces_count, context_id);
 
+	/* Video post-processing — software NV12 scaler, no V4L2 device. */
+	if (config_object != NULL &&
+	    config_object->entrypoint == VAEntrypointVideoProc) {
+		struct object_context *vpp_ctx;
+		VAContextID vid;
+
+		vid = object_heap_allocate(&driver_data->context_heap);
+		vpp_ctx = CONTEXT(driver_data, vid);
+		if (vpp_ctx == NULL)
+			return VA_STATUS_ERROR_ALLOCATION_FAILED;
+		/* Zero everything past object_base — see encode context. */
+		memset(&vpp_ctx->base + 1, 0,
+		       sizeof(*vpp_ctx) - sizeof(vpp_ctx->base));
+		vpp_ctx->config_id = config_id;
+		vpp_ctx->render_surface_id = VA_INVALID_ID;
+		vpp_ctx->vpp_input_surface_id = VA_INVALID_ID;
+		vpp_ctx->picture_width = picture_width;
+		vpp_ctx->picture_height = picture_height;
+		vpp_ctx->flags = flags;
+		vpp_ctx->is_vpp = true;
+		*context_id = vid;
+		return VA_STATUS_SUCCESS;
+	}
+
 	video_format = driver_data->video_format;
 	if (video_format == NULL)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -557,6 +581,13 @@ VAStatus RequestDestroyContext(VADriverContextP context, VAContextID context_id)
 	context_object = CONTEXT(driver_data, context_id);
 	if (context_object == NULL)
 		return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+	/* VPP context: no V4L2 device, just free the heap object. */
+	if (context_object->is_vpp) {
+		object_heap_free(&driver_data->context_heap,
+				 (struct object_base *)context_object);
+		return VA_STATUS_SUCCESS;
+	}
 
 	/* Encode context: tear down the sunxi-venc encoder. */
 	if (context_object->is_encoder) {

@@ -35,6 +35,9 @@
 #include "h264_enc.h"
 #include "h265.h"
 #include "mpeg2.h"
+#include "vpp.h"
+
+#include <va/va_vpp.h>
 
 #include <assert.h>
 #include <string.h>
@@ -339,6 +342,14 @@ VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
                 return VA_STATUS_SUCCESS;
         }
 
+        /* VPP: latch the output surface — the scale runs in EndPicture. */
+        if (context_object->is_vpp) {
+                surface_object->status = VASurfaceRendering;
+                context_object->render_surface_id = surface_id;
+                context_object->vpp_input_surface_id = VA_INVALID_ID;
+                return VA_STATUS_SUCCESS;
+        }
+
         if (surface_object->status == VASurfaceRendering)
                 RequestSyncSurface(context, surface_id);
 
@@ -395,6 +406,26 @@ VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 	config_object = CONFIG(driver_data, context_object->config_id);
 	if (config_object == NULL)
 		return VA_STATUS_ERROR_INVALID_CONFIG;
+
+	/* VPP: latch the pipeline buffer's input surface for this frame. */
+	if (context_object->is_vpp) {
+		for (i = 0; i < buffers_count; i++) {
+			buffer_object = BUFFER(driver_data, buffers_ids[i]);
+			if (buffer_object == NULL)
+				return VA_STATUS_ERROR_INVALID_BUFFER;
+
+			if (buffer_object->type ==
+			    VAProcPipelineParameterBufferType &&
+			    buffer_object->data != NULL) {
+				VAProcPipelineParameterBuffer *p =
+					buffer_object->data;
+
+				context_object->vpp_input_surface_id =
+					p->surface;
+			}
+		}
+		return VA_STATUS_SUCCESS;
+	}
 
 	/* Encode: latch the VAAPI encode parameter buffers for this frame. */
 	if (context_object->is_encoder) {
@@ -505,6 +536,10 @@ VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id)
         /* Encode contexts run the sunxi-venc M2M path. */
         if (context_object->is_encoder)
                 return request_encode_picture(driver_data, context_object);
+
+        /* VPP contexts run the software NV12 scaler. */
+        if (context_object->is_vpp)
+                return vpp_process_picture(driver_data, context_object);
 
         config_object = CONFIG(driver_data, context_object->config_id);
         if (config_object == NULL)

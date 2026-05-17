@@ -49,7 +49,8 @@ sources = [
 	'mpeg2.c',
 	'h264.c',
 	'h264_enc.c',
-	'h265.c'
+	'h265.c',
+	'vpp.c'
 ]
 
 if host_machine.cpu_family() == 'arm'
@@ -74,7 +75,8 @@ headers = [
 	'v4l2_translation.h',
 	'mpeg2.h',
 	'h264.h',
-	'h265.h'
+	'h265.h',
+	'vpp.h'
 ]
 
 includes = [

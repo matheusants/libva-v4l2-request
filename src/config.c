@@ -80,6 +80,15 @@ VAStatus RequestCreateConfig(VADriverContextP context, VAProfile profile,
 			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
 		break;
 
+	case VAProfileNone:
+		/*
+		 * Video post-processing — software NV12 scale/convert. Drives
+		 * Jellyfin's scale_vaapi filter between decode and encode.
+		 */
+		if (entrypoint != VAEntrypointVideoProc)
+			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+		break;
+
 	default:
 		return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 	}
@@ -157,6 +166,10 @@ VAStatus RequestQueryConfigProfiles(VADriverContextP context,
 	if (found && index < (V4L2_REQUEST_MAX_CONFIG_ATTRIBUTES - 1))
 		profiles[index++] = VAProfileHEVCMain;
 
+	/* VAProfileNone carries the video post-processing entrypoint. */
+	if (index < V4L2_REQUEST_MAX_CONFIG_ATTRIBUTES)
+		profiles[index++] = VAProfileNone;
+
 	*profiles_count = index;
 
 	return VA_STATUS_SUCCESS;
@@ -184,6 +197,12 @@ VAStatus RequestQueryConfigEntrypoints(VADriverContextP context,
 		entrypoints[0] = VAEntrypointVLD;
 		entrypoints[1] = VAEntrypointEncSlice;
 		*entrypoints_count = 2;
+		break;
+
+	case VAProfileNone:
+		/* Video post-processing (software NV12 scale/convert). */
+		entrypoints[0] = VAEntrypointVideoProc;
+		*entrypoints_count = 1;
 		break;
 
 	default:

@@ -70,6 +70,8 @@ VAStatus RequestCreateBuffer(VADriverContextP context, VAContextID context_id,
 	/* ffmpeg also submits packed-header buffers; accept and ignore. */
 	case VAEncPackedHeaderParameterBufferType:
 	case VAEncPackedHeaderDataBufferType:
+	/* Video post-processing pipeline buffer (scale_vaapi). */
+	case VAProcPipelineParameterBufferType:
 		break;
 
 	default:

@@ -31,6 +31,9 @@
 #include "picture.h"
 #include "subpicture.h"
 #include "surface.h"
+#include "vpp.h"
+
+#include <va/va_backend_vpp.h>
 
 #include "autoconfig.h"
 
@@ -131,6 +134,17 @@ VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
 	vtable->vaLockSurface = RequestLockSurface;
 	vtable->vaUnlockSurface = RequestUnlockSurface;
 
+	/* Video post-processing entrypoint (software NV12 scale/convert). */
+	if (context->vtable_vpp != NULL) {
+		context->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
+		context->vtable_vpp->vaQueryVideoProcFilters =
+			RequestQueryVideoProcFilters;
+		context->vtable_vpp->vaQueryVideoProcFilterCaps =
+			RequestQueryVideoProcFilterCaps;
+		context->vtable_vpp->vaQueryVideoProcPipelineCaps =
+			RequestQueryVideoProcPipelineCaps;
+	}
+
 	driver_data = malloc(sizeof(*driver_data));
 	memset(driver_data, 0, sizeof(*driver_data));
 
@@ -153,25 +167,31 @@ VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context)
 
 	video_path = getenv("LIBVA_V4L2_REQUEST_VIDEO_PATH");
 	if (video_path == NULL) {
-        	/* Enumera /dev/video0..9 e usa o primeiro que for V4L2_CAP_VIDEO_M2M */
-	        static char found_path[16];
-        	int probe_fd;
-	        unsigned int probe_caps;
-        	int n;
-	        video_path = "/dev/video1"; /* fallback seguro para Cedrus */
-        	for (n = 0; n <= 9; n++) {
-                	snprintf(found_path, sizeof(found_path), "/dev/video%d", n);
-	                //probe_fd = open(found_path, O_RDWR | O_NONBLOCK);
-	                probe_fd = open(found_path, O_RDWR);
-        	        if (probe_fd < 0) continue;
-                	if (v4l2_query_capabilities(probe_fd, &probe_caps) == 0 &&
-	                    (probe_caps & V4L2_CAP_VIDEO_M2M)) {
-        	                close(probe_fd);
-                	        video_path = found_path;
-                        	break;
-	                }
-        	        close(probe_fd);
-	        }
+		/*
+		 * Locate the cedrus decoder by VIDIOC_QUERYCAP driver name.
+		 * A plain V4L2_CAP_VIDEO_M2M probe is not enough: the
+		 * sunxi-venc encoder is also an M2M device, and the node
+		 * numbers swap between boots depending on probe order.
+		 */
+		static char found_path[16];
+		int probe_fd;
+		int n;
+		video_path = "/dev/video1"; /* fallback seguro para Cedrus */
+		for (n = 0; n <= 9; n++) {
+			struct v4l2_capability cap;
+
+			snprintf(found_path, sizeof(found_path),
+				 "/dev/video%d", n);
+			probe_fd = open(found_path, O_RDWR);
+			if (probe_fd < 0) continue;
+			if (ioctl(probe_fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+			    strcmp((const char *)cap.driver, "cedrus") == 0) {
+				close(probe_fd);
+				video_path = found_path;
+				break;
+			}
+			close(probe_fd);
+		}
 	}
 
 	video_fd = open(video_path, O_RDWR | O_NONBLOCK);
