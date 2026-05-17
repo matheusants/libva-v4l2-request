@@ -107,6 +107,99 @@ struct scale_job {
 	int y_start, y_end;	/* destination rows for this worker */
 };
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+
+/*
+ * NEON bilinear resample of one luma (nch=1) destination row, 16 pixels at a
+ * time. The horizontal gather uses vqtbl4q over a 64-byte source window, so a
+ * group is only handled when its 16 taps span <=62 bytes (downscale ratio
+ * <~4x) and the window stays inside the source row. Returns the number of
+ * leading pixels written; the caller resamples the remainder in scalar.
+ */
+static int scale_row_y_neon(const uint8_t *r0, const uint8_t *r1, int fy,
+			    const int *xb, const int *xf, uint8_t *drow,
+			    int dw, int sstride)
+{
+	int16x8_t fyv = vdupq_n_s16((int16_t)fy);
+	int dx;
+
+	for (dx = 0; dx + 16 <= dw; dx += 16) {
+		int wbase = xb[dx];
+		int k;
+		int32x4_t w = vdupq_n_s32(wbase);
+		int32x4_t b0, b1, b2, b3, f0, f1, f2, f3;
+		uint8x16x4_t t0, t1;
+		uint8x16_t idx0, idx1, p00, p01, p10, p11;
+		uint8x8_t outh[2];
+		int16x8_t fxl, fxh;
+
+		if (xb[dx + 15] - wbase > 62 || wbase + 64 > sstride)
+			break;
+
+		/* idx = xb - wbase (-> u8), fx = xf (-> s16), built in NEON. */
+		b0 = vsubq_s32(vld1q_s32(xb + dx), w);
+		b1 = vsubq_s32(vld1q_s32(xb + dx + 4), w);
+		b2 = vsubq_s32(vld1q_s32(xb + dx + 8), w);
+		b3 = vsubq_s32(vld1q_s32(xb + dx + 12), w);
+		idx0 = vcombine_u8(
+			vqmovun_s16(vcombine_s16(vmovn_s32(b0), vmovn_s32(b1))),
+			vqmovun_s16(vcombine_s16(vmovn_s32(b2), vmovn_s32(b3))));
+		idx1 = vaddq_u8(idx0, vdupq_n_u8(1));
+		f0 = vld1q_s32(xf + dx);
+		f1 = vld1q_s32(xf + dx + 4);
+		f2 = vld1q_s32(xf + dx + 8);
+		f3 = vld1q_s32(xf + dx + 12);
+		fxl = vcombine_s16(vmovn_s32(f0), vmovn_s32(f1));
+		fxh = vcombine_s16(vmovn_s32(f2), vmovn_s32(f3));
+
+		t0 = vld1q_u8_x4(r0 + wbase);
+		t1 = vld1q_u8_x4(r1 + wbase);
+		p00 = vqtbl4q_u8(t0, idx0);
+		p01 = vqtbl4q_u8(t0, idx1);
+		p10 = vqtbl4q_u8(t1, idx0);
+		p11 = vqtbl4q_u8(t1, idx1);
+
+		/* Process the low and high 8-lane halves identically. */
+		for (k = 0; k < 2; k++) {
+			int16x8_t a0 = vreinterpretq_s16_u16(vmovl_u8(
+				k ? vget_high_u8(p00) : vget_low_u8(p00)));
+			int16x8_t a1 = vreinterpretq_s16_u16(vmovl_u8(
+				k ? vget_high_u8(p01) : vget_low_u8(p01)));
+			int16x8_t b0 = vreinterpretq_s16_u16(vmovl_u8(
+				k ? vget_high_u8(p10) : vget_low_u8(p10)));
+			int16x8_t b1 = vreinterpretq_s16_u16(vmovl_u8(
+				k ? vget_high_u8(p11) : vget_low_u8(p11)));
+			int16x8_t fx = k ? fxh : fxl;
+			int16x8_t da = vsubq_s16(a1, a0);
+			int16x8_t db = vsubq_s16(b1, b0);
+			int32x4_t pal = vshrq_n_s32(vmull_s16(vget_low_s16(da),
+						    vget_low_s16(fx)), 8);
+			int32x4_t pah = vshrq_n_s32(vmull_s16(vget_high_s16(da),
+						    vget_high_s16(fx)), 8);
+			int32x4_t pbl = vshrq_n_s32(vmull_s16(vget_low_s16(db),
+						    vget_low_s16(fx)), 8);
+			int32x4_t pbh = vshrq_n_s32(vmull_s16(vget_high_s16(db),
+						    vget_high_s16(fx)), 8);
+			int16x8_t top = vaddq_s16(a0,
+				vcombine_s16(vmovn_s32(pal), vmovn_s32(pah)));
+			int16x8_t bot = vaddq_s16(b0,
+				vcombine_s16(vmovn_s32(pbl), vmovn_s32(pbh)));
+			int16x8_t vd = vsubq_s16(bot, top);
+			int32x4_t vl = vshrq_n_s32(vmull_s16(vget_low_s16(vd),
+						   vget_low_s16(fyv)), 8);
+			int32x4_t vh = vshrq_n_s32(vmull_s16(vget_high_s16(vd),
+						   vget_high_s16(fyv)), 8);
+			int16x8_t out = vaddq_s16(top,
+				vcombine_s16(vmovn_s32(vl), vmovn_s32(vh)));
+			outh[k] = vqmovun_s16(out);
+		}
+		vst1q_u8(drow + dx, vcombine_u8(outh[0], outh[1]));
+	}
+	return dx;
+}
+#endif
+
 /* Integer bilinear resample of one destination row band. */
 static void *scale_worker(void *arg)
 {
@@ -121,7 +214,13 @@ static void *scale_worker(void *arg)
 		const uint8_t *r1 = j->src + (size_t)y1 * j->sstride;
 		uint8_t *drow = j->dst + (size_t)dy * j->dstride;
 
-		for (dx = 0; dx < j->dw; dx++) {
+		dx = 0;
+#if defined(__aarch64__)
+		if (j->nch == 1)
+			dx = scale_row_y_neon(r0, r1, fy, j->xb, j->xf,
+					      drow, j->dw, j->sstride);
+#endif
+		for (; dx < j->dw; dx++) {
 			int x0 = j->xb[dx] * j->nch;
 			int x1 = (j->xb[dx] + 1) * j->nch;
 			int fx = j->xf[dx];
