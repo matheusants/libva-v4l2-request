@@ -181,7 +181,9 @@ VAStatus RequestDestroySurfaces(VADriverContextP context,
 	for (i = 0; i < surfaces_count; i++) {
 		surface_object = SURFACE(driver_data, surfaces_ids[i]);
 		if (surface_object == NULL)
-			return VA_STATUS_ERROR_INVALID_SURFACE;
+			/* Tolerate an already-freed surface (idempotent
+			 * destroy) — skip it but still free the rest. */
+			continue;
 
 		if (surface_object->source_data != NULL &&
 		    surface_object->source_size > 0)

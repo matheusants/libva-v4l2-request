@@ -424,6 +424,30 @@ VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 				context_object->enc_pic_valid = true;
 				break;
 
+			case VAEncMiscParameterBufferType: {
+				/* Pull the target bitrate out of an RC misc
+				 * buffer: target = peak * target_percentage. */
+				VAEncMiscParameterBuffer *misc =
+					buffer_object->data;
+
+				if (misc != NULL && misc->type ==
+				    VAEncMiscParameterTypeRateControl) {
+					VAEncMiscParameterRateControl *rc =
+						(VAEncMiscParameterRateControl *)
+						misc->data;
+					unsigned int pct = rc->target_percentage;
+
+					if (pct == 0 || pct > 100)
+						pct = 100;	/* CBR */
+					context_object->enc_rc_bitrate =
+						(unsigned int)
+						((uint64_t)rc->bits_per_second *
+						 pct / 100);
+					context_object->enc_rc_valid = true;
+				}
+				break;
+			}
+
 			case VAEncSliceParameterBufferType:
 				/* The VE emits slice data itself. */
 				break;

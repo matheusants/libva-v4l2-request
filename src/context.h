@@ -83,6 +83,11 @@ struct object_context {
 	bool enc_seq_valid;
 	VAEncPictureParameterBufferH264 enc_pic;
 	bool enc_pic_valid;
+	/* Target bitrate from VAEncMiscParameterRateControl (bits/s). The
+	 * sequence buffer's bits_per_second carries the VBR *peak*, not the
+	 * target — using it overshoots, so the RC misc buffer wins. */
+	unsigned int enc_rc_bitrate;
+	bool enc_rc_valid;
 };
 
 VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,

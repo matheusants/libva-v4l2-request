@@ -80,13 +80,17 @@ VAStatus RequestCreateImage(VADriverContextP context, VAImageFormat *format,
 	destination_planes_count = video_format->planes_count;
 
 	/*
-	 * v4l2_get_format targets the decoder CAPTURE queue. For an encode-side
-	 * image — or any time the query yields a layout too small for the
-	 * requested picture — fall back to a plain 16-aligned NV12 layout
-	 * derived from width/height.
+	 * v4l2_get_format targets the decoder CAPTURE queue, so its layout is
+	 * only valid for an image matching the decoded picture. For an
+	 * encode-side image (different size — e.g. a transcode that scales),
+	 * a query failure, or a layout too small for the request, fall back to
+	 * a plain 16-aligned NV12 layout derived from width/height. Using the
+	 * decoder's wider pitch for a smaller encode frame mismatches the
+	 * encoder's stride and produces a corrupt (green/banded) picture.
 	 */
 	if (rc < 0 || destination_bytesperlines[0] < (unsigned int)width ||
-	    format_height < (unsigned int)height) {
+	    format_height < (unsigned int)height ||
+	    format_width != (unsigned int)width) {
 		destination_bytesperlines[0] = ((unsigned int)width + 15) & ~15U;
 		format_height = ((unsigned int)height + 15) & ~15U;
 	}

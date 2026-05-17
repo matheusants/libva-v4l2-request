@@ -76,9 +76,24 @@ int h264_enc_set_controls(struct object_context *context, VAProfile profile,
 		VAEncSequenceParameterBufferH264 *seq = &context->enc_seq;
 		unsigned int gop;
 
-		if (seq->bits_per_second > 0)
+		/*
+		 * Prefer the RC misc buffer's target bitrate; the sequence
+		 * buffer only carries the VBR peak (often 2x the target).
+		 */
+		unsigned int bitrate = context->enc_rc_valid ?
+			context->enc_rc_bitrate : seq->bits_per_second;
+
+		request_log("h264_enc: seq peak_bps=%u rc_bps=%u idr=%u "
+			    "intra=%u level=%u units_in_tick=%u time_scale=%u\n",
+			    seq->bits_per_second,
+			    context->enc_rc_valid ? context->enc_rc_bitrate : 0,
+			    seq->intra_idr_period, seq->intra_period,
+			    seq->level_idc, seq->num_units_in_tick,
+			    seq->time_scale);
+
+		if (bitrate > 0)
 			enc_set_ctrl(fd, V4L2_CID_MPEG_VIDEO_BITRATE,
-				     seq->bits_per_second, "BITRATE");
+				     bitrate, "BITRATE");
 
 		/* Frames between IDRs: prefer the IDR period. */
 		gop = seq->intra_idr_period ? seq->intra_idr_period :
@@ -94,6 +109,26 @@ int h264_enc_set_controls(struct object_context *context, VAProfile profile,
 			enc_set_ctrl(fd, V4L2_CID_MPEG_VIDEO_H264_LEVEL,
 				     enc_level_menu(seq->level_idc),
 				     "H264_LEVEL");
+
+		/*
+		 * Frame rate drives the driver-side rate-control bit budget.
+		 * H264 fps = time_scale / (2 * num_units_in_tick); feed it via
+		 * S_PARM so RC budgets per-frame bits at the real rate (a wrong
+		 * default overshoots the target bitrate proportionally).
+		 */
+		if (seq->num_units_in_tick > 0 && seq->time_scale > 0) {
+			struct v4l2_streamparm parm = {
+				.type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+			};
+
+			parm.parm.output.timeperframe.numerator =
+				2 * seq->num_units_in_tick;
+			parm.parm.output.timeperframe.denominator =
+				seq->time_scale;
+			if (ioctl(fd, VIDIOC_S_PARM, &parm) < 0)
+				request_log("h264_enc: S_PARM fps failed: %s\n",
+					    strerror(errno));
+		}
 	}
 
 	/* Per-frame controls. */
