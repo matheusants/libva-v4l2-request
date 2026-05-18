@@ -263,16 +263,46 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 		context_object->encoder_streaming = true;
 	}
 
-	nv12_size = context_object->picture_width *
-		    context_object->picture_height * 3 / 2;
-	if (nv12_size > context_object->enc_out_size)
-		nv12_size = context_object->enc_out_size;
-	if (nv12_size > surface_object->source_size)
-		nv12_size = surface_object->source_size;
+	/*
+	 * The source surface holds a tight NV12 frame (chroma at width*height),
+	 * but the encoder's OUTPUT buffer aligns the luma plane height to 16 —
+	 * for a non-16-aligned height the chroma plane sits at a higher offset.
+	 * Copy the two planes to their real offsets and pad the alignment gap
+	 * by replicating the last row, else the encoder reads chroma as luma
+	 * (a green band/tint in the output).
+	 */
+	{
+		unsigned int pw = context_object->picture_width;
+		unsigned int ph = context_object->picture_height;
+		unsigned int ah = (ph + 15) & ~15u;	/* aligned luma height */
+		uint8_t *eo = context_object->enc_out_data;
+		const uint8_t *sd = surface_object->source_data;
+		unsigned int r;
 
-	/* Copy the uploaded NV12 frame into the encoder's OUTPUT buffer. */
-	memcpy(context_object->enc_out_data, surface_object->source_data,
-	       nv12_size);
+		nv12_size = pw * ah * 3 / 2;
+		if (nv12_size > context_object->enc_out_size ||
+		    pw * ph * 3 / 2 > surface_object->source_size) {
+			/* Layouts disagree — fall back to a flat copy. */
+			unsigned int n = pw * ph * 3 / 2;
+
+			if (n > context_object->enc_out_size)
+				n = context_object->enc_out_size;
+			if (n > surface_object->source_size)
+				n = surface_object->source_size;
+			memcpy(eo, sd, n);
+			nv12_size = n;
+		} else {
+			/* Luma plane + replicated gap. */
+			memcpy(eo, sd, pw * ph);
+			for (r = ph; r < ah; r++)
+				memcpy(eo + r * pw, sd + (ph - 1) * pw, pw);
+			/* Chroma plane at the aligned offset + replicated gap. */
+			memcpy(eo + pw * ah, sd + pw * ph, pw * ph / 2);
+			for (r = ph / 2; r < ah / 2; r++)
+				memcpy(eo + pw * ah + r * pw,
+				       sd + pw * ph + (ph / 2 - 1) * pw, pw);
+		}
+	}
 
 	gettimeofday(&timestamp, NULL);
 
@@ -422,6 +452,21 @@ VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 
 				context_object->vpp_input_surface_id =
 					p->surface;
+				/* Latch the input crop rect — the decoder
+				 * surface is 16-aligned but only the region
+				 * holds valid pixels. */
+				if (p->surface_region != NULL) {
+					context_object->vpp_src_x =
+						p->surface_region->x;
+					context_object->vpp_src_y =
+						p->surface_region->y;
+					context_object->vpp_src_w =
+						p->surface_region->width;
+					context_object->vpp_src_h =
+						p->surface_region->height;
+				} else {
+					context_object->vpp_src_w = 0;
+				}
 			}
 		}
 		return VA_STATUS_SUCCESS;

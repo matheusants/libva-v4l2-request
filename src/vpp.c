@@ -321,41 +321,61 @@ VAStatus vpp_process_picture(struct request_data *driver_data,
 	if (in == NULL || out == NULL)
 		return VA_STATUS_ERROR_INVALID_SURFACE;
 
-	sw = in->width;
-	sh = in->height;
+	/*
+	 * Use the input crop rect when present — the decoder surface is
+	 * 16-aligned, but only the content region holds valid pixels; scaling
+	 * the padding rows would smear them into the bottom of the output.
+	 */
+	if (context_object->vpp_src_w > 0) {
+		sw = context_object->vpp_src_w;
+		sh = context_object->vpp_src_h;
+	} else {
+		sw = in->width;
+		sh = in->height;
+	}
 	sstride = in->destination_bytesperlines[0];
-	if (sstride < sw)
-		sstride = sw;
+	if (sstride < in->width)
+		sstride = in->width;
 	dw = out->width;
 	dh = out->height;
 	if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
 	/*
-	 * The decoder CAPTURE buffer is linear NV12 (kernel patch 0007) — scale
-	 * straight from it. A tiled buffer is detiled into a scratch copy first.
+	 * NV12 plane offsets use the surface's allocated (16-aligned) height —
+	 * that is where the chroma plane physically starts — while the crop
+	 * rect (cx,cy) places the content origin within it.
 	 */
+	{
+	int buf_h = in->height;
+	int cx = context_object->vpp_src_x;
+	int cy = context_object->vpp_src_y;
+
 	if (video_format_is_linear(driver_data->video_format)) {
-		src_y = in->destination_data[0];
-		if (in->destination_planes_count >= 2)
-			src_uv = in->destination_data[1];
-		else
-			src_uv = (const uint8_t *)in->destination_data[0] +
-				 (size_t)sstride * sh;
+		const uint8_t *y_base = in->destination_data[0];
+		const uint8_t *uv_base =
+			in->destination_planes_count >= 2 ?
+			in->destination_data[1] :
+			y_base + (size_t)sstride * buf_h;
+
+		src_y = y_base + (size_t)cy * sstride + cx;
+		src_uv = uv_base + (size_t)(cy / 2) * sstride + cx;
 	} else {
-		detiled = malloc((size_t)sstride * sh * 3 / 2);
+		detiled = malloc((size_t)sstride * buf_h * 3 / 2);
 		if (detiled == NULL)
 			return VA_STATUS_ERROR_ALLOCATION_FAILED;
 		tiled_to_planar_mt(in->destination_data[0], detiled, sstride,
-				   sstride, sh);
+				   sstride, buf_h);
 		tiled_to_planar_mt(in->destination_planes_count >= 2 ?
 				   in->destination_data[1] :
 				   (uint8_t *)in->destination_data[0] +
-				   (size_t)sstride * sh,
-				   detiled + (size_t)sstride * sh, sstride,
-				   sstride, sh / 2);
-		src_y = detiled;
-		src_uv = detiled + (size_t)sstride * sh;
+				   (size_t)sstride * buf_h,
+				   detiled + (size_t)sstride * buf_h, sstride,
+				   sstride, buf_h / 2);
+		src_y = detiled + (size_t)cy * sstride + cx;
+		src_uv = detiled + (size_t)sstride * buf_h +
+			 (size_t)(cy / 2) * sstride + cx;
+	}
 	}
 
 	/* Output: tight NV12 in the surface heap buffer the encoder reads. */

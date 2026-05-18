@@ -98,6 +98,10 @@ struct object_context {
 	 */
 	bool is_vpp;
 	VASurfaceID vpp_input_surface_id;
+	/* Input crop from VAProcPipelineParameterBuffer.surface_region — the
+	 * real content rect inside a (16-aligned) decoder surface. w==0 means
+	 * "whole surface". */
+	int vpp_src_x, vpp_src_y, vpp_src_w, vpp_src_h;
 };
 
 VAStatus RequestCreateContext(VADriverContextP context, VAConfigID config_id,

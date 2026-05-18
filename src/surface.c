@@ -335,7 +335,9 @@ VAStatus RequestQuerySurfaceAttributes(VADriverContextP context,
 	attributes_list[i].type = VASurfaceAttribMaxWidth;
 	attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
 	attributes_list[i].value.type = VAGenericValueTypeInteger;
-	attributes_list[i].value.value.i = 2048;
+	/* The T527 VE decodes up to 4K — a 2048 cap forced 4K inputs to
+	 * software decode. */
+	attributes_list[i].value.value.i = 3840;
 	i++;
 
 	attributes_list[i].type = VASurfaceAttribMinHeight;
@@ -347,7 +349,7 @@ VAStatus RequestQuerySurfaceAttributes(VADriverContextP context,
 	attributes_list[i].type = VASurfaceAttribMaxHeight;
 	attributes_list[i].flags = VA_SURFACE_ATTRIB_GETTABLE;
 	attributes_list[i].value.type = VAGenericValueTypeInteger;
-	attributes_list[i].value.value.i = 2048;
+	attributes_list[i].value.value.i = 2160;
 	i++;
 
 	attributes_list[i].type = VASurfaceAttribMemoryType;
