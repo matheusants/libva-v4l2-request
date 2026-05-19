@@ -264,12 +264,14 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	}
 
 	/*
-	 * The source surface holds a tight NV12 frame (chroma at width*height),
-	 * but the encoder's OUTPUT buffer aligns the luma plane height to 16 —
-	 * for a non-16-aligned height the chroma plane sits at a higher offset.
-	 * Copy the two planes to their real offsets and pad the alignment gap
-	 * by replicating the last row, else the encoder reads chroma as luma
-	 * (a green band/tint in the output).
+	 * The source surface holds an NV12 frame whose luma plane height is the
+	 * surface's own (possibly 16-aligned) buffer height — scale_vaapi packs
+	 * it tight to the picture, hwupload pads it to a macroblock row. The
+	 * encoder's OUTPUT buffer aligns the luma plane up to a macroblock row,
+	 * so the chroma plane sits at offset pw*ah. Derive the *source* luma
+	 * plane size from source_size (luma = 2/3 of an NV12 frame) so the
+	 * chroma plane is read from its real offset regardless of source
+	 * padding, then replicate the last row to fill the encoder's gap.
 	 */
 	{
 		unsigned int pw = context_object->picture_width;
@@ -277,30 +279,32 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 		unsigned int ah = (ph + 15) & ~15u;	/* aligned luma height */
 		uint8_t *eo = context_object->enc_out_data;
 		const uint8_t *sd = surface_object->source_data;
+		/* Source luma plane = 2/3 of the tight NV12 frame; sh is its
+		 * row count (the surface's real buffer height). */
+		unsigned int src_luma = surface_object->source_size / 3 * 2;
+		unsigned int sh = pw ? src_luma / pw : 0;
 		unsigned int r;
 
 		nv12_size = pw * ah * 3 / 2;
-		if (nv12_size > context_object->enc_out_size ||
-		    pw * ph * 3 / 2 > surface_object->source_size) {
+		if (sh == 0 || sh > ah ||
+		    nv12_size > context_object->enc_out_size) {
 			/* Layouts disagree — fall back to a flat copy. */
-			unsigned int n = pw * ph * 3 / 2;
+			unsigned int n = surface_object->source_size;
 
 			if (n > context_object->enc_out_size)
 				n = context_object->enc_out_size;
-			if (n > surface_object->source_size)
-				n = surface_object->source_size;
 			memcpy(eo, sd, n);
 			nv12_size = n;
 		} else {
-			/* Luma plane + replicated gap. */
-			memcpy(eo, sd, pw * ph);
-			for (r = ph; r < ah; r++)
-				memcpy(eo + r * pw, sd + (ph - 1) * pw, pw);
+			/* Luma plane: sh source rows + replicated gap to ah. */
+			memcpy(eo, sd, pw * sh);
+			for (r = sh; r < ah; r++)
+				memcpy(eo + r * pw, sd + (sh - 1) * pw, pw);
 			/* Chroma plane at the aligned offset + replicated gap. */
-			memcpy(eo + pw * ah, sd + pw * ph, pw * ph / 2);
-			for (r = ph / 2; r < ah / 2; r++)
+			memcpy(eo + pw * ah, sd + src_luma, pw * sh / 2);
+			for (r = sh / 2; r < ah / 2; r++)
 				memcpy(eo + pw * ah + r * pw,
-				       sd + pw * ph + (ph / 2 - 1) * pw, pw);
+				       sd + src_luma + (sh / 2 - 1) * pw, pw);
 		}
 	}
 

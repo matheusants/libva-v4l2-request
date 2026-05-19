@@ -129,6 +129,39 @@ int h264_enc_set_controls(struct object_context *context, VAProfile profile,
 				request_log("h264_enc: S_PARM fps failed: %s\n",
 					    strerror(errno));
 		}
+
+		/*
+		 * ffmpeg/VAAPI hands the encoder a 16-aligned coded size; the
+		 * real visible rectangle lives in the SPS frame_cropping
+		 * fields. Convey it as an OUTPUT crop selection so the driver
+		 * emits matching SPS frame_cropping — without it the bottom
+		 * padding macroblock rows decode as green.
+		 */
+		if (seq->frame_cropping_flag) {
+			/* 4:2:0 progressive: CropUnitX = CropUnitY = 2. */
+			struct v4l2_selection sel = {
+				.type = V4L2_BUF_TYPE_VIDEO_OUTPUT,
+				.target = V4L2_SEL_TGT_CROP,
+			};
+
+			sel.r.left = 0;
+			sel.r.top = 0;
+			sel.r.width = context->picture_width -
+				2 * (seq->frame_crop_left_offset +
+				     seq->frame_crop_right_offset);
+			sel.r.height = context->picture_height -
+				2 * (seq->frame_crop_top_offset +
+				     seq->frame_crop_bottom_offset);
+
+			request_log("h264_enc: crop visible %ux%u "
+				    "(coded %dx%d)\n", sel.r.width,
+				    sel.r.height, context->picture_width,
+				    context->picture_height);
+
+			if (ioctl(fd, VIDIOC_S_SELECTION, &sel) < 0)
+				request_log("h264_enc: S_SELECTION failed: "
+					    "%s\n", strerror(errno));
+		}
 	}
 
 	/* Per-frame controls. */
