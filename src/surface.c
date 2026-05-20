@@ -41,10 +41,13 @@
 #include "drm_fourcc.h"
 #include <linux/videodev2.h>
 
+#include "context.h"
 #include "media.h"
+#include "picture.h"
 #include "utils.h"
 #include "v4l2.h"
 #include "video.h"
+#include "object_heap.h"
 
 VAStatus RequestCreateSurfaces2(VADriverContextP context, unsigned int format,
 				unsigned int width, unsigned int height,
@@ -242,7 +245,29 @@ VAStatus RequestSyncSurface(VADriverContextP context, VASurfaceID surface_id)
         goto complete;
     }
 
-    request_fd = surface_object->request_fd; 
+    /*
+     * (M4) If an encoder context has a deferred encode pending on this
+     * surface, drain it here. Marks the surface VASurfaceReady; the rest
+     * of this function (decode-side request_fd / poll / DQBUF) is skipped
+     * because the path below requires a decoder request_fd.
+     */
+    {
+        int it;
+        struct object_base *iter =
+            object_heap_first(&driver_data->context_heap, &it);
+        while (iter != NULL) {
+            struct object_context *ctx = (struct object_context *)iter;
+            if (ctx->is_encoder && ctx->enc_pending &&
+                ctx->enc_pending_surface_id == surface_id) {
+                request_encode_drain_pending(driver_data, ctx);
+                status = VA_STATUS_SUCCESS;
+                goto complete;
+            }
+            iter = object_heap_next(&driver_data->context_heap, &it);
+        }
+    }
+
+    request_fd = surface_object->request_fd;
     if (request_fd < 0) {
         status = VA_STATUS_ERROR_OPERATION_FAILED;
         goto error;

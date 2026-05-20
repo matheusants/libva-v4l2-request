@@ -26,6 +26,7 @@
 
 #include "context.h"
 #include "config.h"
+#include "picture.h"
 #include "request.h"
 #include "surface.h"
 
@@ -198,6 +199,9 @@ static VAStatus request_create_encode_context(struct request_data *driver_data,
 	context_object->is_encoder = true;
 	context_object->encoder_fd = fd;
 	context_object->encoder_streaming = false;
+	context_object->enc_pending = false;
+	context_object->enc_pending_coded_buf = VA_INVALID_ID;
+	context_object->enc_pending_surface_id = VA_INVALID_ID;
 
 	request_log("encode: context %u ready, %dx%d, OUTPUT=%u CAPTURE=%u\n",
 		    id, picture_width, picture_height, context_object->enc_out_size,
@@ -601,6 +605,10 @@ VAStatus RequestDestroyContext(VADriverContextP context, VAContextID context_id)
 
 	/* Encode context: tear down the sunxi-venc encoder. */
 	if (context_object->is_encoder) {
+		/* (M4) Drain any deferred encode so the kernel-side OUTPUT
+		 * dma-buf import is dropped before we close the encoder fd. */
+		if (context_object->enc_pending)
+			request_encode_drain_pending(driver_data, context_object);
 		if (context_object->encoder_streaming) {
 			v4l2_set_stream(context_object->encoder_fd,
 					v4l2_type_video_output(false), false);

@@ -214,23 +214,89 @@ static VAStatus codec_set_controls(struct request_data *driver_data,
 }
 
 /*
- * M4 — encode one frame on the sunxi-venc M2M encoder. Program the V4L2
- * controls from the latched VAAPI parameters, queue the raw NV12 input and a
- * coded-output buffer, wait for the encode, and copy the coded H264 into the
- * VA coded buffer. The encoder fd is blocking, so DQBUF waits for completion.
+ * (M4) Drain a previously-submitted encode: DQBUF OUTPUT + CAPTURE, then
+ * memcpy the coded bitstream into the deferred VAEncCodedBuffer that was
+ * latched at submit time. Marks the surface VASurfaceReady. Safe to call
+ * when no encode is pending — returns success immediately.
+ */
+VAStatus request_encode_drain_pending(struct request_data *driver_data,
+				      struct object_context *context_object)
+{
+	struct object_surface *surface_object;
+	struct object_buffer *coded_object;
+	unsigned int output_type = v4l2_type_video_output(false);
+	unsigned int capture_type = v4l2_type_video_capture(false);
+	unsigned int coded_bytes = 0;
+	int fd;
+
+	if (!context_object || !context_object->enc_pending)
+		return VA_STATUS_SUCCESS;
+
+	fd = context_object->encoder_fd;
+
+	if (v4l2_dequeue_buffer(fd, -1, output_type,
+				context_object->enc_out_index, 1) < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	if (v4l2_dequeue_buffer_size(fd, capture_type,
+				     context_object->enc_cap_index, 1,
+				     &coded_bytes) < 0)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	coded_object = BUFFER(driver_data, context_object->enc_pending_coded_buf);
+	if (coded_object == NULL ||
+	    coded_object->type != VAEncCodedBufferType)
+		return VA_STATUS_ERROR_INVALID_BUFFER;
+
+	if (coded_bytes > coded_object->size)
+		coded_bytes = coded_object->size;
+	memcpy(coded_object->data, context_object->enc_cap_data, coded_bytes);
+
+	coded_object->coded_segment.buf = coded_object->data;
+	coded_object->coded_segment.size = coded_bytes;
+	coded_object->coded_segment.bit_offset = 0;
+	coded_object->coded_segment.status = 0;
+	coded_object->coded_segment.next = NULL;
+
+	surface_object = SURFACE(driver_data, context_object->enc_pending_surface_id);
+	if (surface_object != NULL)
+		surface_object->status = VASurfaceReady;
+
+	context_object->enc_pending = false;
+	context_object->enc_pending_coded_buf = VA_INVALID_ID;
+	context_object->enc_pending_surface_id = VA_INVALID_ID;
+	context_object->enc_frame_num++;
+
+	return VA_STATUS_SUCCESS;
+}
+
+/*
+ * (M4) Submit one frame to the sunxi-venc M2M encoder and RETURN. The
+ * blocking DQBUF + memcpy of coded data is deferred — it runs in
+ * request_encode_drain_pending() at the next encode submit, at
+ * vaSyncSurface, or at vaMapBuffer of the coded VAEncCodedBuffer. This
+ * gives the caller a window (between vaEndPicture and the eventual sync)
+ * to issue the next frame's decode while the encoder runs on HW.
  */
 static VAStatus request_encode_picture(struct request_data *driver_data,
 				       struct object_context *context_object)
 {
 	struct object_config *config_object;
 	struct object_surface *surface_object;
-	struct object_buffer *coded_object;
 	unsigned int output_type = v4l2_type_video_output(false);
 	unsigned int capture_type = v4l2_type_video_capture(false);
-	unsigned int nv12_size, coded_bytes = 0;
+	unsigned int nv12_size;
 	struct timeval timestamp;
 	int fd = context_object->encoder_fd;
 	int rc;
+	VAStatus drain_status;
+
+	/* (M4) Drain previous encode before submitting the next one. The HW
+	 * has a single OUTPUT+CAPTURE slot pair, so any pending encode must
+	 * complete before re-queuing those slots. */
+	drain_status = request_encode_drain_pending(driver_data, context_object);
+	if (drain_status != VA_STATUS_SUCCESS)
+		return drain_status;
 
 	config_object = CONFIG(driver_data, context_object->config_id);
 	if (config_object == NULL)
@@ -259,11 +325,8 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 
 	/*
 	 * (M2) Zero-copy: feed the encoder OUTPUT from the cedrus CAPTURE
-	 * buffer via dma-buf. The decoded NV12 frame already lives in cedrus'
-	 * imported-IOMMU range; sunxi-venc imports the same fd via the
-	 * V4L2_MEMORY_DMABUF QBUF and reads it directly with no CPU touch.
-	 * Lazily export the cedrus CAPTURE fd on first use per surface; the
-	 * fd is closed in RequestDestroySurfaces.
+	 * buffer via dma-buf. Lazily export the cedrus CAPTURE fd on first
+	 * use per surface; the fd is closed in RequestDestroySurfaces.
 	 */
 	if (surface_object->destination_dmabuf_fd[0] < 0) {
 		unsigned int decoder_capture_type =
@@ -305,34 +368,14 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	/* Blocking DQBUF — waits for the encode to finish. */
-	if (v4l2_dequeue_buffer(fd, -1, output_type,
-				context_object->enc_out_index, 1) < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
-
-	if (v4l2_dequeue_buffer_size(fd, capture_type,
-				     context_object->enc_cap_index, 1,
-				     &coded_bytes) < 0)
-		return VA_STATUS_ERROR_OPERATION_FAILED;
-
-	/* Copy the coded H264 into the VA coded buffer. */
-	coded_object = BUFFER(driver_data, context_object->enc_pic.coded_buf);
-	if (coded_object == NULL ||
-	    coded_object->type != VAEncCodedBufferType)
-		return VA_STATUS_ERROR_INVALID_BUFFER;
-
-	if (coded_bytes > coded_object->size)
-		coded_bytes = coded_object->size;
-	memcpy(coded_object->data, context_object->enc_cap_data, coded_bytes);
-
-	coded_object->coded_segment.buf = coded_object->data;
-	coded_object->coded_segment.size = coded_bytes;
-	coded_object->coded_segment.bit_offset = 0;
-	coded_object->coded_segment.status = 0;
-	coded_object->coded_segment.next = NULL;
-
-	context_object->enc_frame_num++;
-	surface_object->status = VASurfaceReady;
+	/*
+	 * (M4) Defer DQBUF + coded-buffer fill — the caller is expected to
+	 * issue the next decode while the encoder runs. Drain runs lazily
+	 * at the next submit / vaSyncSurface / vaMapBuffer of coded.
+	 */
+	context_object->enc_pending = true;
+	context_object->enc_pending_coded_buf = context_object->enc_pic.coded_buf;
+	context_object->enc_pending_surface_id = context_object->render_surface_id;
 	context_object->render_surface_id = VA_INVALID_ID;
 
 	return VA_STATUS_SUCCESS;

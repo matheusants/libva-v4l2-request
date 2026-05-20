@@ -30,11 +30,17 @@
 #include <va/va_backend.h>
 
 #include "object_heap.h"
+#include "context.h"
+#include "request.h"
 
 VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
 			     VASurfaceID surface_id);
 VAStatus RequestRenderPicture(VADriverContextP context, VAContextID context_id,
 			      VABufferID *buffers, int buffers_count);
 VAStatus RequestEndPicture(VADriverContextP context, VAContextID context_id);
+
+/* (M4) Lazy drain of a deferred encode (DQBUF + coded-buffer fill). */
+VAStatus request_encode_drain_pending(struct request_data *driver_data,
+				      struct object_context *context_object);
 
 #endif

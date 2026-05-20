@@ -26,6 +26,7 @@
 
 #include "buffer.h"
 #include "context.h"
+#include "picture.h"
 #include "request.h"
 #include "surface.h"
 #include "video.h"
@@ -159,6 +160,26 @@ VAStatus RequestMapBuffer(VADriverContextP context, VABufferID buffer_id,
 
 	/* A coded buffer maps to its VACodedBufferSegment list. */
 	if (buffer_object->type == VAEncCodedBufferType) {
+		/* (M4) Force the deferred encode drain so the segment list
+		 * actually carries the coded H264 the caller is about to
+		 * read. The encoder context that owns this buffer is the one
+		 * whose enc_pending_coded_buf == buffer_id. */
+		int it;
+		struct object_base *iter;
+
+		iter = object_heap_first(&driver_data->context_heap, &it);
+		while (iter != NULL) {
+			struct object_context *ctx =
+				(struct object_context *)iter;
+			if (ctx->is_encoder && ctx->enc_pending &&
+			    ctx->enc_pending_coded_buf == buffer_id) {
+				request_encode_drain_pending(driver_data, ctx);
+				break;
+			}
+			iter = object_heap_next(&driver_data->context_heap,
+						&it);
+		}
+
 		*data_map = &buffer_object->coded_segment;
 		return VA_STATUS_SUCCESS;
 	}

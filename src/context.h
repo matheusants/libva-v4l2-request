@@ -78,6 +78,18 @@ struct object_context {
 	void *enc_cap_data;
 	unsigned int enc_cap_size;
 
+	/*
+	 * (M4) Pipeline parallelism: request_encode_picture submits the encode
+	 * (QBUF OUTPUT+CAPTURE) without immediately DQBUFing — that gives the
+	 * caller a window to issue the next frame's decode while the encoder
+	 * runs on HW. The DQBUF + memcpy into the VACodedBuffer is deferred
+	 * until the next submit (or vaSyncSurface / vaMapBuffer of the coded
+	 * buffer) calls request_encode_drain_pending().
+	 */
+	bool enc_pending;
+	VABufferID enc_pending_coded_buf;
+	VASurfaceID enc_pending_surface_id;
+
 	/* Encode parameters latched via RenderPicture for the current frame. */
 	VAEncSequenceParameterBufferH264 enc_seq;
 	bool enc_seq_valid;
