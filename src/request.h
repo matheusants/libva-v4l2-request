@@ -63,6 +63,24 @@ struct request_data {
 	bool capture_buffers_created;
 	bool output_streaming;
 	bool capture_streaming;
+
+	/*
+	 * (M11) Decode control cache. Cedrus consumes V4L2 controls in
+	 * V4L2_CTRL_WHICH_CUR_VAL mode (BSP T527 quirk — not REQUEST_VAL), so
+	 * the controls are kernel-side state that persists across requests.
+	 * SPS / PPS / MATRIX / PRED_WEIGHTS rarely change frame-to-frame on
+	 * typical H264 streams; cache the last raw bytes and skip the
+	 * VIDIOC_S_EXT_CTRLS syscall when memcmp says nothing changed.
+	 * `cache_valid_*` track whether we've sent any value yet.
+	 */
+	unsigned char h264_cache_sps[1048];
+	unsigned char h264_cache_pps[12];
+	unsigned char h264_cache_matrix[480];
+	unsigned char h264_cache_pred_weights[772];
+	bool h264_cache_sps_valid;
+	bool h264_cache_pps_valid;
+	bool h264_cache_matrix_valid;
+	bool h264_cache_pred_weights_valid;
 };
 
 VAStatus VA_DRIVER_INIT_FUNC(VADriverContextP context);

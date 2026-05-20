@@ -46,6 +46,7 @@
 #include "v4l2_translation.h"
 #include "v4l2.h"
 #include "utils.h"
+#include "request.h"
 
 /* -----------------------------------------------------------------------
  * translate_sps() — 1048→1048, layout idêntico
@@ -319,7 +320,45 @@ static void translate_decode_params(
  * bipred weights) enviar pred_weights desnecessariamente pode causar
  * EINVAL em alguns drivers.
  * ----------------------------------------------------------------------- */
+/*
+ * (M11) Helper: send a V4L2 control only when the bytes differ from the
+ * last value we sent on this driver_data. Skips the ioctl when nothing
+ * changed (typical for SPS/PPS/MATRIX on a stable H264 stream).
+ *
+ * The cache stores the post-translation UAPI bytes; that's exactly what
+ * the kernel sees, so any value the kernel needs to act on is visible to
+ * the memcmp. Cedrus uses V4L2_CTRL_WHICH_CUR_VAL (BSP T527 quirk) so
+ * the controls are persistent kernel-side state, not per-request.
+ */
+static int set_ctrl_if_changed(int video_fd, int request_fd, unsigned int id,
+			       const void *value, size_t value_size,
+			       unsigned char *cache, size_t cache_size,
+			       bool *cache_valid, const char *label)
+{
+	int rc;
+
+	if (cache && cache_valid && *cache_valid &&
+	    value_size <= cache_size &&
+	    memcmp(cache, value, value_size) == 0)
+		return 0; /* unchanged — skip the ioctl */
+
+	rc = v4l2_set_control(video_fd, request_fd, id,
+			      (void *)value, value_size);
+	if (rc < 0) {
+		request_log("h264_translate: %s FAILED\n", label);
+		return -1;
+	}
+
+	if (cache && cache_valid && value_size <= cache_size) {
+		memcpy(cache, value, value_size);
+		*cache_valid = true;
+	}
+
+	return 0;
+}
+
 int h264_translate_and_set_controls(
+	struct request_data *driver_data,
 	int video_fd,
 	int request_fd,
 	const struct v4l2_ctrl_h264_sps_internal    		*sps_proj,
@@ -334,7 +373,7 @@ int h264_translate_and_set_controls(
 	struct v4l2_ctrl_h264_pred_weights   pred_weights;
 	struct v4l2_ctrl_h264_slice_params   slice;
 	struct v4l2_ctrl_h264_decode_params  decode;
-	int need_pred_weights;
+	bool need_pred_weights;
 	int rc;
 
 	translate_sps(sps_proj, &sps);
@@ -343,15 +382,23 @@ int h264_translate_and_set_controls(
 	translate_slice_params(slice_proj, &slice);
 	translate_decode_params(decode_proj, slice_proj, &decode);
 
-/*
-	 * Sempre enviar PRED_WEIGHTS (mesmo se não for obrigatório) para
-	 * sobrescrever dados residuais de requisições anteriores, já que
-	 * MEDIA_REQUEST_IOC_REINIT é no-op no BSP T527.
+	/*
+	 * (M12) PRED_WEIGHTS is only required when the slice actually
+	 * carries explicit weighted prediction. The old defensive "always
+	 * send" workaround was for a stale MEDIA_REQUEST_IOC_REINIT bug
+	 * (verified working on T527 BSP 2026-05-20, see [[reinit-works-perf-flat]]).
+	 * Cache it as well — when the slice type changes rarely (typical
+	 * Baseline/Main streams), this saves the ioctl on most frames.
 	 */
-	translate_pred_weights(slice_proj, &pred_weights);
-	need_pred_weights = 1;
+	need_pred_weights = ((pps_proj->flags & V4L2_H264_PPS_FLAG_WEIGHTED_PRED) &&
+			     (slice.slice_type == V4L2_H264_SLICE_TYPE_P ||
+			      slice.slice_type == V4L2_H264_SLICE_TYPE_SP)) ||
+			    (pps_proj->weighted_bipred_idc == 1 &&
+			     slice.slice_type == V4L2_H264_SLICE_TYPE_B);
+	if (need_pred_weights)
+		translate_pred_weights(slice_proj, &pred_weights);
 
-	/* --- DECODE --- */
+	/* --- DECODE (always — changes every frame) --- */
 	rc = v4l2_set_control(video_fd, request_fd,
 			      V4L2_CID_STATELESS_H264_DECODE_PARAMS,
 			      &decode, sizeof(decode));
@@ -360,7 +407,7 @@ int h264_translate_and_set_controls(
 		return -1;
 	}
 
-	/* --- SLICE --- */
+	/* --- SLICE (always — changes every frame) --- */
 	rc = v4l2_set_control(video_fd, request_fd,
 			      V4L2_CID_STATELESS_H264_SLICE_PARAMS,
 			      &slice, sizeof(slice));
@@ -369,43 +416,52 @@ int h264_translate_and_set_controls(
 		return -1;
 	}
 
-	/* --- PRED_WEIGHTS (condicional) --- */
+	/* --- PRED_WEIGHTS (M11/M12: conditional + cached) --- */
 	if (need_pred_weights) {
-		rc = v4l2_set_control(video_fd, request_fd,
-				      V4L2_CID_STATELESS_H264_PRED_WEIGHTS,
-				      &pred_weights, sizeof(pred_weights));
-		if (rc < 0) {
-			request_log("h264_translate: PRED_WEIGHTS FAILED\n");
+		rc = set_ctrl_if_changed(video_fd, request_fd,
+			V4L2_CID_STATELESS_H264_PRED_WEIGHTS,
+			&pred_weights, sizeof(pred_weights),
+			driver_data ? driver_data->h264_cache_pred_weights : NULL,
+			sizeof(((struct request_data *)0)->h264_cache_pred_weights),
+			driver_data ? &driver_data->h264_cache_pred_weights_valid : NULL,
+			"PRED_WEIGHTS");
+		if (rc < 0)
 			return -1;
-		}
+	} else if (driver_data) {
+		/* Slice no longer needs weights — invalidate cache so the next
+		 * weighted slice forces a fresh set. */
+		driver_data->h264_cache_pred_weights_valid = false;
 	}
 
-	/* --- PPS --- */
-	rc = v4l2_set_control(video_fd, request_fd,
-			      V4L2_CID_STATELESS_H264_PPS,
-			      &pps, sizeof(pps));
-	if (rc < 0) {
-		request_log("h264_translate: PPS FAILED\n");
+	/* --- PPS (M11: cached) --- */
+	rc = set_ctrl_if_changed(video_fd, request_fd,
+		V4L2_CID_STATELESS_H264_PPS, &pps, sizeof(pps),
+		driver_data ? driver_data->h264_cache_pps : NULL,
+		sizeof(((struct request_data *)0)->h264_cache_pps),
+		driver_data ? &driver_data->h264_cache_pps_valid : NULL,
+		"PPS");
+	if (rc < 0)
 		return -1;
-	}
 
-	/* --- SPS --- */
-	rc = v4l2_set_control(video_fd, request_fd,
-			      V4L2_CID_STATELESS_H264_SPS,
-			      &sps, sizeof(sps));
-	if (rc < 0) {
-		request_log("h264_translate: SPS FAILED\n");
+	/* --- SPS (M11: cached) --- */
+	rc = set_ctrl_if_changed(video_fd, request_fd,
+		V4L2_CID_STATELESS_H264_SPS, &sps, sizeof(sps),
+		driver_data ? driver_data->h264_cache_sps : NULL,
+		sizeof(((struct request_data *)0)->h264_cache_sps),
+		driver_data ? &driver_data->h264_cache_sps_valid : NULL,
+		"SPS");
+	if (rc < 0)
 		return -1;
-	}
 
-	/* --- SCALING MATRIX --- */
-	rc = v4l2_set_control(video_fd, request_fd,
-			      V4L2_CID_STATELESS_H264_SCALING_MATRIX,
-			      &matrix, sizeof(matrix));
-	if (rc < 0) {
-		request_log("h264_translate: SCALING_MATRIX FAILED\n");
+	/* --- SCALING MATRIX (M11: cached) --- */
+	rc = set_ctrl_if_changed(video_fd, request_fd,
+		V4L2_CID_STATELESS_H264_SCALING_MATRIX, &matrix, sizeof(matrix),
+		driver_data ? driver_data->h264_cache_matrix : NULL,
+		sizeof(((struct request_data *)0)->h264_cache_matrix),
+		driver_data ? &driver_data->h264_cache_matrix_valid : NULL,
+		"SCALING_MATRIX");
+	if (rc < 0)
 		return -1;
-	}
 
 	return 0;
 }

@@ -551,7 +551,8 @@ int h264_set_controls(struct request_data *driver_data,
 	 *   DECODE:  496 →  624 (tradução campo a campo necessária)
 	 */
 
-	rc = h264_translate_and_set_controls(driver_data->video_fd,
+	rc = h264_translate_and_set_controls(driver_data,
+										 driver_data->video_fd,
 										 surface->request_fd, &sps,
 										 &pps, &matrix, &slice, &decode);
 

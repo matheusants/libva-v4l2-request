@@ -56,7 +56,9 @@
  *
  * Retorna 0 em sucesso, -1 em falha (errno preservado de v4l2_set_control).
  */
+struct request_data;
 int h264_translate_and_set_controls(
+	struct request_data *driver_data,
 	int video_fd,
 	int request_fd,
 	const struct v4l2_ctrl_h264_sps_internal    *sps,
