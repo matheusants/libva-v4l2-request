@@ -269,6 +269,91 @@ int v4l2_create_buffers(int video_fd, unsigned int type,
 	return 0;
 }
 
+/*
+ * M2: create slot(s) with V4L2_MEMORY_DMABUF so the queue accepts imported
+ * dma-buf fds at QBUF time. No backing buffer is allocated kernel-side; the
+ * driver re-attaches per-QBUF based on buf.m.fd. Used by the encoder OUTPUT
+ * queue to receive decoded NV12 frames directly from cedrus CAPTURE without
+ * an intermediate mmap/memcpy.
+ */
+int v4l2_create_buffers_dmabuf(int video_fd, unsigned int type,
+			       unsigned int buffers_count,
+			       unsigned int *index_base)
+{
+	struct v4l2_create_buffers buffers;
+	int rc;
+
+	memset(&buffers, 0, sizeof(buffers));
+	buffers.format.type = type;
+	buffers.memory = V4L2_MEMORY_DMABUF;
+	buffers.count = buffers_count;
+
+	rc = ioctl(video_fd, VIDIOC_G_FMT, &buffers.format);
+	if (rc < 0) {
+		request_log("Unable to get format for type %d (dmabuf): %s\n",
+			    type, strerror(errno));
+		return -1;
+	}
+
+	rc = ioctl(video_fd, VIDIOC_CREATE_BUFS, &buffers);
+	if (rc < 0) {
+		request_log("Unable to create DMABUF buffer for type %d: %s\n",
+			    type, strerror(errno));
+		return -1;
+	}
+
+	if (index_base != NULL)
+		*index_base = buffers.index;
+
+	return 0;
+}
+
+/*
+ * M2: queue a buffer with V4L2_MEMORY_DMABUF. The slot at `index` must have
+ * been created with v4l2_create_buffers_dmabuf(). `dmabuf_fd` is an fd
+ * exported by another V4L2 device (decoder CAPTURE → encoder OUTPUT).
+ * `size` is the per-plane bytesused.
+ */
+int v4l2_queue_buffer_dmabuf(int video_fd, unsigned int type, int dmabuf_fd,
+			     unsigned int index, unsigned int size,
+			     unsigned int buffers_count)
+{
+	struct v4l2_plane planes[buffers_count];
+	struct v4l2_buffer buffer;
+	unsigned int i;
+	int rc;
+
+	memset(planes, 0, sizeof(planes));
+	memset(&buffer, 0, sizeof(buffer));
+
+	buffer.type = type;
+	buffer.memory = V4L2_MEMORY_DMABUF;
+	buffer.index = index;
+
+	if (v4l2_type_is_mplane(type)) {
+		buffer.length = buffers_count;
+		buffer.m.planes = planes;
+		for (i = 0; i < buffers_count; i++) {
+			buffer.m.planes[i].m.fd = dmabuf_fd;
+			buffer.m.planes[i].bytesused = size;
+			buffer.m.planes[i].length = size;
+		}
+	} else {
+		buffer.m.fd = dmabuf_fd;
+		buffer.bytesused = size;
+		buffer.length = size;
+	}
+
+	rc = ioctl(video_fd, VIDIOC_QBUF, &buffer);
+	if (rc < 0) {
+		request_log("Unable to QBUF DMABUF type %d fd %d: %s\n",
+			    type, dmabuf_fd, strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
 int v4l2_query_buffer(int video_fd, unsigned int type, unsigned int index,
 		      unsigned int *lengths, unsigned int *offsets,
 		      unsigned int buffers_count)

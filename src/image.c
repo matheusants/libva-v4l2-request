@@ -323,6 +323,20 @@ VAStatus RequestPutImage(VADriverContextP context, VASurfaceID surface_id,
 
 	size = image_object->image.data_size;
 
+	/*
+	 * (M3) Zero-copy short-circuit: if the surface was produced by the
+	 * cedrus decoder (it has either a CAPTURE mapping or an exported
+	 * dma-buf), the encoder reads the decoded NV12 directly via the
+	 * dma-buf wired in request_encode_picture (M2). A PutImage upload in
+	 * that case would be wasted memcpy — there is no consumer of
+	 * source_data. Return success without touching the heap.
+	 */
+	if (surface_object->source_data == NULL &&
+	    (surface_object->destination_dmabuf_fd[0] >= 0 ||
+	     surface_object->destination_data[0] != NULL)) {
+		return VA_STATUS_SUCCESS;
+	}
+
 	/* Give the encode input surface a heap buffer on first upload. */
 	if (surface_object->source_data == NULL) {
 		surface_object->source_data = malloc(size);

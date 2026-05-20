@@ -243,12 +243,6 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	if (!context_object->enc_pic_valid)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	if (surface_object->source_data == NULL) {
-		request_log("encode: surface 0x%x was never uploaded\n",
-			    context_object->render_surface_id);
-		return VA_STATUS_ERROR_OPERATION_FAILED;
-	}
-
 	/* Program controls; on the first frame also STREAMON both queues. */
 	h264_enc_set_controls(context_object, config_object->profile,
 			      !context_object->encoder_streaming);
@@ -264,48 +258,36 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	}
 
 	/*
-	 * The source surface holds an NV12 frame whose luma plane height is the
-	 * surface's own (possibly 16-aligned) buffer height — scale_vaapi packs
-	 * it tight to the picture, hwupload pads it to a macroblock row. The
-	 * encoder's OUTPUT buffer aligns the luma plane up to a macroblock row,
-	 * so the chroma plane sits at offset pw*ah. Derive the *source* luma
-	 * plane size from source_size (luma = 2/3 of an NV12 frame) so the
-	 * chroma plane is read from its real offset regardless of source
-	 * padding, then replicate the last row to fill the encoder's gap.
+	 * (M2) Zero-copy: feed the encoder OUTPUT from the cedrus CAPTURE
+	 * buffer via dma-buf. The decoded NV12 frame already lives in cedrus'
+	 * imported-IOMMU range; sunxi-venc imports the same fd via the
+	 * V4L2_MEMORY_DMABUF QBUF and reads it directly with no CPU touch.
+	 * Lazily export the cedrus CAPTURE fd on first use per surface; the
+	 * fd is closed in RequestDestroySurfaces.
 	 */
+	if (surface_object->destination_dmabuf_fd[0] < 0) {
+		unsigned int decoder_capture_type =
+			v4l2_type_video_capture(false);
+		int fd_out = -1;
+		int erc = v4l2_export_buffer(driver_data->video_fd,
+					     decoder_capture_type,
+					     surface_object->destination_index,
+					     0, &fd_out, 1);
+		if (erc < 0 || fd_out < 0) {
+			request_log("encode: EXPBUF cedrus CAPTURE idx %u failed\n",
+				    surface_object->destination_index);
+			return VA_STATUS_ERROR_OPERATION_FAILED;
+		}
+		surface_object->destination_dmabuf_fd[0] = fd_out;
+	}
+
 	{
 		unsigned int pw = context_object->picture_width;
 		unsigned int ph = context_object->picture_height;
-		unsigned int ah = (ph + 15) & ~15u;	/* aligned luma height */
-		uint8_t *eo = context_object->enc_out_data;
-		const uint8_t *sd = surface_object->source_data;
-		/* Source luma plane = 2/3 of the tight NV12 frame; sh is its
-		 * row count (the surface's real buffer height). */
-		unsigned int src_luma = surface_object->source_size / 3 * 2;
-		unsigned int sh = pw ? src_luma / pw : 0;
-		unsigned int r;
-
+		unsigned int ah = (ph + 15) & ~15u;
 		nv12_size = pw * ah * 3 / 2;
-		if (sh == 0 || sh > ah ||
-		    nv12_size > context_object->enc_out_size) {
-			/* Layouts disagree — fall back to a flat copy. */
-			unsigned int n = surface_object->source_size;
-
-			if (n > context_object->enc_out_size)
-				n = context_object->enc_out_size;
-			memcpy(eo, sd, n);
-			nv12_size = n;
-		} else {
-			/* Luma plane: sh source rows + replicated gap to ah. */
-			memcpy(eo, sd, pw * sh);
-			for (r = sh; r < ah; r++)
-				memcpy(eo + r * pw, sd + (sh - 1) * pw, pw);
-			/* Chroma plane at the aligned offset + replicated gap. */
-			memcpy(eo + pw * ah, sd + src_luma, pw * sh / 2);
-			for (r = sh / 2; r < ah / 2; r++)
-				memcpy(eo + pw * ah + r * pw,
-				       sd + src_luma + (sh / 2 - 1) * pw, pw);
-		}
+		if (nv12_size > context_object->enc_out_size)
+			nv12_size = context_object->enc_out_size;
 	}
 
 	gettimeofday(&timestamp, NULL);
@@ -316,8 +298,10 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	rc = v4l2_queue_buffer(fd, -1, output_type, &timestamp,
-			       context_object->enc_out_index, nv12_size, 1);
+	rc = v4l2_queue_buffer_dmabuf(fd, output_type,
+				      surface_object->destination_dmabuf_fd[0],
+				      context_object->enc_out_index,
+				      nv12_size, 1);
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
@@ -410,11 +394,15 @@ VAStatus RequestBeginPicture(VADriverContextP context, VAContextID context_id,
         }
 
 	if (surface_object->request_fd >= 0) {
-		/* MEDIA_REQUEST_IOC_REINIT is a no-op on BSP T527.
-		 * Close the old request_fd and allocate a new one in
-		 * RequestEndPicture. */
-		close(surface_object->request_fd);
-		surface_object->request_fd = -1;
+		/* Try MEDIA_REQUEST_IOC_REINIT first to reuse the same fd
+		 * (saves close + MEDIA_IOC_REQUEST_ALLOC per frame). The
+		 * T527 BSP kernel implements REINIT correctly; on any
+		 * failure (e.g. EBUSY because completion hasn't landed)
+		 * fall back to close + realloc in RequestEndPicture. */
+		if (media_request_reinit(surface_object->request_fd) < 0) {
+			close(surface_object->request_fd);
+			surface_object->request_fd = -1;
+		}
 	}
 
         surface_object->status = VASurfaceRendering;

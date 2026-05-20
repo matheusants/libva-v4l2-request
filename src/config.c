@@ -63,17 +63,22 @@ VAStatus RequestCreateConfig(VADriverContextP context, VAProfile profile,
 
 	case VAProfileH264Main:
 	case VAProfileH264ConstrainedBaseline:
+	case VAProfileH264High:
 		/*
 		 * H264: VLD decode (cedrus) or EncSlice encode (sunxi-venc).
-		 * Encode is limited to Baseline/Main — the VE bit-writer emits
-		 * baseline-syntax SPS (no High-profile scaling-matrix block).
+		 * The VE bit-writer only emits baseline-syntax SPS (no
+		 * High-profile scaling-matrix / 8x8-transform block), so an
+		 * EncSlice request for any of these profiles is accepted and
+		 * silently produces a Constrained Baseline stream. High is
+		 * advertised because ffmpeg/Jellyfin default h264_vaapi to
+		 * High and do not fall back; the emitted stream still decodes
+		 * everywhere (Constrained Baseline is a High subset).
 		 */
 		if (entrypoint != VAEntrypointVLD &&
 		    entrypoint != VAEntrypointEncSlice)
 			return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
 		break;
 
-	case VAProfileH264High:
 	case VAProfileH264MultiviewHigh:
 	case VAProfileH264StereoHigh:
 		if (entrypoint != VAEntrypointVLD)
@@ -183,7 +188,6 @@ VAStatus RequestQueryConfigEntrypoints(VADriverContextP context,
 	switch (profile) {
 	case VAProfileMPEG2Simple:
 	case VAProfileMPEG2Main:
-	case VAProfileH264High:
 	case VAProfileH264MultiviewHigh:
 	case VAProfileH264StereoHigh:
 	case VAProfileHEVCMain:
@@ -193,7 +197,9 @@ VAStatus RequestQueryConfigEntrypoints(VADriverContextP context,
 
 	case VAProfileH264Main:
 	case VAProfileH264ConstrainedBaseline:
-		/* Decode (cedrus VLD) + encode (sunxi-venc EncSlice). */
+	case VAProfileH264High:
+		/* Decode (cedrus VLD) + encode (sunxi-venc EncSlice). High
+		 * encode downgrades to a Constrained Baseline stream. */
 		entrypoints[0] = VAEntrypointVLD;
 		entrypoints[1] = VAEntrypointEncSlice;
 		*entrypoints_count = 2;

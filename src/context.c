@@ -134,10 +134,18 @@ static VAStatus request_create_encode_context(struct request_data *driver_data,
 		goto error_fd;
 	}
 
-	/* One transient buffer per queue — the encode is synchronous. */
-	rc = v4l2_create_buffers(fd, output_type, 1, &output_base);
+	/*
+	 * One transient buffer per queue — the encode is synchronous.
+	 * (M2) OUTPUT is created in V4L2_MEMORY_DMABUF mode: the encoder
+	 * receives the decoded NV12 frame as an imported dma-buf fd at QBUF
+	 * time (sourced from cedrus CAPTURE) instead of an mmap'd backing
+	 * buffer. This skips ~13 MB of memcpy per 4K frame in the encode
+	 * hot path (see request_encode_picture). CAPTURE keeps MMAP — coded
+	 * H264 is read back into a VACodedBuffer (~1 MB) on every frame.
+	 */
+	rc = v4l2_create_buffers_dmabuf(fd, output_type, 1, &output_base);
 	if (rc < 0) {
-		request_log("encode: CREATE_BUFS OUTPUT failed\n");
+		request_log("encode: CREATE_BUFS OUTPUT (dmabuf) failed\n");
 		goto error_fd;
 	}
 
@@ -156,16 +164,18 @@ static VAStatus request_create_encode_context(struct request_data *driver_data,
 	memset(&context_object->base + 1, 0,
 	       sizeof(*context_object) - sizeof(context_object->base));
 
-	/* mmap the OUTPUT (raw NV12 in) and CAPTURE (coded H264 out) buffers. */
-	rc = v4l2_query_buffer(fd, output_type, output_base, &length, &offset, 1);
-	if (rc < 0)
-		goto error_ctx;
-	map = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
-	if (map == MAP_FAILED)
-		goto error_ctx;
-	context_object->enc_out_index = output_base;
-	context_object->enc_out_data = map;
-	context_object->enc_out_size = length;
+	/* (M2) OUTPUT is dma-buf — no mmap. Compute the expected per-frame
+	 * size from the negotiated S_FMT for sanity checks at QBUF time. */
+	{
+		unsigned int wq, hq, bpl, sz, pn;
+
+		rc = v4l2_get_format(fd, output_type, &wq, &hq, &bpl, &sz, &pn);
+		if (rc < 0)
+			goto error_ctx;
+		context_object->enc_out_index = output_base;
+		context_object->enc_out_data = NULL;
+		context_object->enc_out_size = sz;
+	}
 
 	rc = v4l2_query_buffer(fd, capture_type, capture_base, &length, &offset,
 			       1);
