@@ -1,4 +1,66 @@
-# v4l2-request libVA Backend
+# v4l2-request libVA Backend — Allwinner T527 (OrangePi 4A)
+
+> **T527 fork** of [bootlin/libva-v4l2-request](https://github.com/bootlin/libva-v4l2-request).
+> Adds H264/H265/MPEG2 hardware decode and H264 VAAPI encode for the Allwinner T527 SoC
+> (OrangePi 4A, BSP kernel 5.15-sun55iw3).
+
+## Allwinner T527 — Quick Start
+
+### 1. Apply the DTS patch (required)
+
+The cedrus VE node in the OrangePi 4A device tree must be patched before building the kernel.
+Using [orangepi-build](https://github.com/orangepi-xunlong/orangepi-build):
+
+```sh
+# Copy the patch into the orangepi-build userpatches directory
+cp dts-patches/0007-t527-dts.patch \
+   ~/orangepi-build/userpatches/kernel/sun55iw3-current/
+
+# Rebuild and install the kernel
+cd ~/orangepi-build
+sudo ./build.sh BOARD=orangepi4a BRANCH=current BUILD_OPT=kernel KERNEL_CONFIGURE=no
+sudo dpkg -i output/debs/linux-image-*.deb output/debs/linux-dtb-*.deb
+sudo reboot
+```
+
+The patch adjusts the cedrus node: correct register range, clock names, IOMMU master 2
+binding, and disables the unused ve1 node.
+
+### 2. Build and install the kernel driver
+
+Use the [cedrus-t527](https://github.com/matheusants/cedrus-t527) driver (decode only)
+or [sunxi-venc-t527](https://github.com/matheusants/sunxi-venc-t527) (decode + encode).
+Place the driver files at `drivers/staging/media/sunxi/cedrus/` in the kernel tree and
+include them in the orangepi-build userpatches, then rebuild.
+
+### 3. Build and install this library
+
+```sh
+meson setup build
+ninja -C build
+sudo ninja -C build install
+```
+
+Set `LIBVA_DRIVER_NAME=v4l2_request` and `LIBVA_DRIVERS_PATH` to the install path.
+
+### Test
+
+```sh
+LIBVA_DRIVER_NAME=v4l2_request LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri \
+  ffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 \
+  -i input.mp4 -vframes 10 -f null -
+```
+
+### Performance (792 MHz VE)
+
+| Workload | fps |
+|---|---|
+| 4K H264 → 4K H264 (VAAPI transcode) | 26 fps / 1.08× realtime |
+| 4K H264 → 720p H264 | 37 fps / 1.54× |
+| 1440×1080 HEVC → H264 | 110 fps / 4.58× |
+| 4K H264 decode-only | ~40 fps |
+
+---
 
 ## About
 
