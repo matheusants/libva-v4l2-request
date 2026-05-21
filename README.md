@@ -26,14 +26,48 @@ sudo reboot
 The patch adjusts the cedrus node: correct register range, clock names, IOMMU master 2
 binding, and disables the unused ve1 node.
 
-### 2. Build and install the kernel driver
+### 2. Load the required kernel modules
+
+After the kernel is installed, load the driver modules:
+
+**Decode only (H264/H265/MPEG2):**
+
+```sh
+sudo modprobe sunxi-cedrus
+ls /dev/video1 /dev/media1   # must exist
+```
+
+**Decode + encode (H264 VAAPI transcode):**
+
+```sh
+sudo modprobe sunxi-cedrus
+sudo modprobe sunxi-venc
+ls /dev/video1 /dev/video2 /dev/media1   # all must exist
+```
+
+**Load at boot:**
+
+```sh
+# Decode only
+echo "sunxi-cedrus" | sudo tee -a /etc/modules-load.d/modules.conf
+
+# Decode + encode (order matters)
+echo -e "sunxi-cedrus\nsunxi-venc" | sudo tee -a /etc/modules-load.d/modules.conf
+```
+
+| Module | Device | Source |
+|---|---|---|
+| `sunxi-cedrus` | `/dev/video1`, `/dev/media1` | [cedrus-t527](https://github.com/matheusants/cedrus-t527) |
+| `sunxi-venc` | `/dev/video2` | [sunxi-venc-t527](https://github.com/matheusants/sunxi-venc-t527) |
+
+### 3. Build and install the kernel driver
 
 Use the [cedrus-t527](https://github.com/matheusants/cedrus-t527) driver (decode only)
 or [sunxi-venc-t527](https://github.com/matheusants/sunxi-venc-t527) (decode + encode).
 Place the driver files at `drivers/staging/media/sunxi/cedrus/` in the kernel tree and
 include them in the orangepi-build userpatches, then rebuild.
 
-### 3. Build and install this library
+### 4. Build and install this library
 
 ```sh
 meson setup build
@@ -43,7 +77,7 @@ sudo ninja -C build install
 
 Set `LIBVA_DRIVER_NAME=v4l2_request` and `LIBVA_DRIVERS_PATH` to the install path.
 
-### Test
+### 5. Test
 
 ```sh
 LIBVA_DRIVER_NAME=v4l2_request LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri \
