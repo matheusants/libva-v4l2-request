@@ -44,6 +44,9 @@ int v4l2_create_buffers(int video_fd, unsigned int type,
 int v4l2_create_buffers_dmabuf(int video_fd, unsigned int type,
 			       unsigned int buffers_count,
 			       unsigned int *index_base);
+int v4l2_create_buffers_userptr(int video_fd, unsigned int type,
+				unsigned int buffers_count,
+				unsigned int *index_base);
 int v4l2_query_buffer(int video_fd, unsigned int type, unsigned int index,
 		      unsigned int *lengths, unsigned int *offsets,
 		      unsigned int buffers_count);
@@ -55,6 +58,9 @@ int v4l2_queue_buffer(int video_fd, int request_fd, unsigned int type,
 int v4l2_queue_buffer_dmabuf(int video_fd, unsigned int type, int dmabuf_fd,
 			     unsigned int index, unsigned int size,
 			     unsigned int buffers_count);
+int v4l2_queue_buffer_userptr(int video_fd, unsigned int type,
+			      unsigned long userptr, unsigned int index,
+			      unsigned int size, unsigned int buffers_count);
 int v4l2_dequeue_buffer(int video_fd, int request_fd, unsigned int type,
 			unsigned int index, unsigned int buffers_count);
 int v4l2_dequeue_buffer_size(int video_fd, unsigned int type,

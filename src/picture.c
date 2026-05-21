@@ -324,26 +324,12 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	}
 
 	/*
-	 * (M2) Zero-copy: feed the encoder OUTPUT from the cedrus CAPTURE
-	 * buffer via dma-buf. Lazily export the cedrus CAPTURE fd on first
-	 * use per surface; the fd is closed in RequestDestroySurfaces.
+	 * (M17) Fill the encoder OUTPUT MMAP from the right source. VPP
+	 * surfaces deliver tight NV12 at picture_width × picture_height in
+	 * source_data; decoder-derived surfaces have raw NV12 mmap'd at
+	 * destination_data[0] (cedrus CAPTURE, picture_width-aligned stride,
+	 * 16-row-aligned height).
 	 */
-	if (surface_object->destination_dmabuf_fd[0] < 0) {
-		unsigned int decoder_capture_type =
-			v4l2_type_video_capture(false);
-		int fd_out = -1;
-		int erc = v4l2_export_buffer(driver_data->video_fd,
-					     decoder_capture_type,
-					     surface_object->destination_index,
-					     0, &fd_out, 1);
-		if (erc < 0 || fd_out < 0) {
-			request_log("encode: EXPBUF cedrus CAPTURE idx %u failed\n",
-				    surface_object->destination_index);
-			return VA_STATUS_ERROR_OPERATION_FAILED;
-		}
-		surface_object->destination_dmabuf_fd[0] = fd_out;
-	}
-
 	{
 		unsigned int pw = context_object->picture_width;
 		unsigned int ph = context_object->picture_height;
@@ -351,6 +337,24 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 		nv12_size = pw * ah * 3 / 2;
 		if (nv12_size > context_object->enc_out_size)
 			nv12_size = context_object->enc_out_size;
+	}
+
+	if (context_object->enc_out_data == NULL)
+		return VA_STATUS_ERROR_OPERATION_FAILED;
+
+	if (surface_object->source_data != NULL) {
+		unsigned int copy_size = nv12_size;
+		if (surface_object->source_size < copy_size)
+			copy_size = surface_object->source_size;
+		memcpy(context_object->enc_out_data, surface_object->source_data,
+		       copy_size);
+	} else if (surface_object->destination_data[0] != NULL) {
+		memcpy(context_object->enc_out_data,
+		       surface_object->destination_data[0], nv12_size);
+	} else {
+		request_log("encode: surface %u has no NV12 source (no VPP, no decoder)\n",
+			    context_object->render_surface_id);
+		return VA_STATUS_ERROR_OPERATION_FAILED;
 	}
 
 	gettimeofday(&timestamp, NULL);
@@ -361,10 +365,8 @@ static VAStatus request_encode_picture(struct request_data *driver_data,
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 
-	rc = v4l2_queue_buffer_dmabuf(fd, output_type,
-				      surface_object->destination_dmabuf_fd[0],
-				      context_object->enc_out_index,
-				      nv12_size, 1);
+	rc = v4l2_queue_buffer(fd, -1, output_type, &timestamp,
+			       context_object->enc_out_index, nv12_size, 1);
 	if (rc < 0)
 		return VA_STATUS_ERROR_OPERATION_FAILED;
 

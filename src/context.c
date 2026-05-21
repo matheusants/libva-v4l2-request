@@ -137,16 +137,17 @@ static VAStatus request_create_encode_context(struct request_data *driver_data,
 
 	/*
 	 * One transient buffer per queue — the encode is synchronous.
-	 * (M2) OUTPUT is created in V4L2_MEMORY_DMABUF mode: the encoder
-	 * receives the decoded NV12 frame as an imported dma-buf fd at QBUF
-	 * time (sourced from cedrus CAPTURE) instead of an mmap'd backing
-	 * buffer. This skips ~13 MB of memcpy per 4K frame in the encode
-	 * hot path (see request_encode_picture). CAPTURE keeps MMAP — coded
-	 * H264 is read back into a VACodedBuffer (~1 MB) on every frame.
+	 * (M17) OUTPUT is created in V4L2_MEMORY_MMAP and memcpy-filled per
+	 * frame. The M2 DMABUF path was correct only for decoder-derived
+	 * surfaces and silently read stale data for VPP-derived (scale_vaapi)
+	 * surfaces. USERPTR cannot be used because vb2_dma_contig rejects
+	 * heap pages (no IOMMU dma-buf attach path for userspace ranges on
+	 * this BSP). CAPTURE stays MMAP — coded H264 (~1 MB) is read back
+	 * into a VACodedBuffer every frame.
 	 */
-	rc = v4l2_create_buffers_dmabuf(fd, output_type, 1, &output_base);
+	rc = v4l2_create_buffers(fd, output_type, 1, &output_base);
 	if (rc < 0) {
-		request_log("encode: CREATE_BUFS OUTPUT (dmabuf) failed\n");
+		request_log("encode: CREATE_BUFS OUTPUT failed\n");
 		goto error_fd;
 	}
 
@@ -165,17 +166,22 @@ static VAStatus request_create_encode_context(struct request_data *driver_data,
 	memset(&context_object->base + 1, 0,
 	       sizeof(*context_object) - sizeof(context_object->base));
 
-	/* (M2) OUTPUT is dma-buf — no mmap. Compute the expected per-frame
-	 * size from the negotiated S_FMT for sanity checks at QBUF time. */
+	/* (M17) Map the OUTPUT slot — memcpy NV12 into it before QBUF. */
 	{
-		unsigned int wq, hq, bpl, sz, pn;
+		unsigned int out_len, out_off;
+		void *out_map;
 
-		rc = v4l2_get_format(fd, output_type, &wq, &hq, &bpl, &sz, &pn);
+		rc = v4l2_query_buffer(fd, output_type, output_base,
+				       &out_len, &out_off, 1);
 		if (rc < 0)
 			goto error_ctx;
+		out_map = mmap(NULL, out_len, PROT_READ | PROT_WRITE, MAP_SHARED,
+			       fd, out_off);
+		if (out_map == MAP_FAILED)
+			goto error_ctx;
 		context_object->enc_out_index = output_base;
-		context_object->enc_out_data = NULL;
-		context_object->enc_out_size = sz;
+		context_object->enc_out_data = out_map;
+		context_object->enc_out_size = out_len;
 	}
 
 	rc = v4l2_query_buffer(fd, capture_type, capture_base, &length, &offset,

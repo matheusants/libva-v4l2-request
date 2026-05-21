@@ -309,6 +309,85 @@ int v4l2_create_buffers_dmabuf(int video_fd, unsigned int type,
 }
 
 /*
+ * M17 hybrid path: create OUTPUT buffers with V4L2_MEMORY_USERPTR so a
+ * single queue accepts both decode-derived (mmap'd cedrus CAPTURE) and
+ * VPP-derived (heap-allocated source_data) user pointers. Kernel pins
+ * user pages at QBUF and IOMMU-coalesces the scatterlist into one IOVA
+ * for vb2_dma_contig — no copy required for either path.
+ */
+int v4l2_create_buffers_userptr(int video_fd, unsigned int type,
+				unsigned int buffers_count,
+				unsigned int *index_base)
+{
+	struct v4l2_create_buffers buffers;
+	int rc;
+
+	memset(&buffers, 0, sizeof(buffers));
+	buffers.format.type = type;
+	buffers.memory = V4L2_MEMORY_USERPTR;
+	buffers.count = buffers_count;
+
+	rc = ioctl(video_fd, VIDIOC_G_FMT, &buffers.format);
+	if (rc < 0) {
+		request_log("Unable to get format for type %d (userptr): %s\n",
+			    type, strerror(errno));
+		return -1;
+	}
+
+	rc = ioctl(video_fd, VIDIOC_CREATE_BUFS, &buffers);
+	if (rc < 0) {
+		request_log("Unable to create USERPTR buffer for type %d: %s\n",
+			    type, strerror(errno));
+		return -1;
+	}
+
+	if (index_base != NULL)
+		*index_base = buffers.index;
+
+	return 0;
+}
+
+int v4l2_queue_buffer_userptr(int video_fd, unsigned int type,
+			      unsigned long userptr, unsigned int index,
+			      unsigned int size, unsigned int buffers_count)
+{
+	struct v4l2_plane planes[buffers_count];
+	struct v4l2_buffer buffer;
+	unsigned int i;
+	int rc;
+
+	memset(planes, 0, sizeof(planes));
+	memset(&buffer, 0, sizeof(buffer));
+
+	buffer.type = type;
+	buffer.memory = V4L2_MEMORY_USERPTR;
+	buffer.index = index;
+
+	if (v4l2_type_is_mplane(type)) {
+		buffer.length = buffers_count;
+		buffer.m.planes = planes;
+		for (i = 0; i < buffers_count; i++) {
+			buffer.m.planes[i].m.userptr = userptr;
+			buffer.m.planes[i].bytesused = size;
+			buffer.m.planes[i].length = size;
+		}
+	} else {
+		buffer.m.userptr = userptr;
+		buffer.bytesused = size;
+		buffer.length = size;
+	}
+
+	rc = ioctl(video_fd, VIDIOC_QBUF, &buffer);
+	if (rc < 0) {
+		request_log("Unable to QBUF USERPTR type %d ptr %#lx: %s\n",
+			    type, userptr, strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
  * M2: queue a buffer with V4L2_MEMORY_DMABUF. The slot at `index` must have
  * been created with v4l2_create_buffers_dmabuf(). `dmabuf_fd` is an fd
  * exported by another V4L2 device (decoder CAPTURE → encoder OUTPUT).
